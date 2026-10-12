@@ -1,102 +1,124 @@
-# ZeroRouter：用 200 道固定“体检题”让新模型进入旧路由池
+# 04 ZeroRouter：让新模型做 200 道固定“体检题”，估出能力再接入
 
-ZeroRouter 研究的是：路由系统已经训练好，后来又发布了一个新模型，怎样用较少测试把它接进来？如果路由器只会输出训练时那几个模型的编号，候选池一变，原来的预测网络往往也要跟着改。ZeroRouter 把这个接口换成了共享能力空间：题目用“难度和区分度”表示，模型用“能力”表示，两者组合后预测作答表现。新模型先完成一批预选锚点题，系统据此估计它的能力、输出长度和延迟；用户的新问题到来时，再综合各候选的预期表现、费用和时间选择模型。论文中的新模型实验用了 200 条反馈，因此这里的 zero-shot 不能理解为“新模型一题也不用测”。它省去的是重新训练整套路由预测网络的过程。[方法总览](translations/04_ZeroRouter_中文译文.md#fig-2) · [200 题接入实验](translations/04_ZeroRouter_中文译文.md#s4-4-onboarding)
+> **在主线上的位置：第 2 站（固定题单）之一。**
+> 上一篇 [IRT-Router](03_IRT-Router_精读核验.md) 凭简介猜新模型的能力，猜得不准。ZeroRouter 沿用 IRT 框架，但让新模型**真的做题**：先在旧模型上建好共享能力空间，新模型只需做一批预先选好的锚点题，就能估出自己的能力。锚点怎么选（D-optimal）是主线上出现的**第一个选题方法**。
+> 它留给下一站的问题：题单在新模型答题前就定死了，前几题答得怎样不影响后面测什么。[ICL-Router](05_ICL-Router_精读核验.md) 是另一种固定题单；[RADAR](06_RADAR_精读核验.md) 则让题单随答题结果变化。
+>
+> 原论文：[arXiv:2601.06220v1](https://arxiv.org/abs/2601.06220v1)（2026.01.09；现有文件以参考文献结束，没有附录）· [中文译文](translations/04_ZeroRouter_中文译文.md#title) · [中文 PDF](pdfs/zh/ZeroRouter_Chinese.pdf)
+> 全仓库统一记号见 [README](README.md#统一记号)。
 
-全文可读版：[中文译文，含公式、图表和参考文献](translations/04_ZeroRouter_中文译文.md#title)。本文依据 2026 年 1 月 9 日的 arXiv:2601.06220v1；现有中英文文件都以参考文献结束，没有附录。正文虽提到附录，本笔记不把这句话当成附录入口。
+## 链路速查
 
-## 1. 先建立共同坐标，再让新题和新模型进入这个空间
+| 环节 | ZeroRouter 的做法 |
+|---|---|
+| 候选池 | 两个各 5 个模型的池分别路由；另有 50 个新模型用于动态接入 |
+| 问题表示 | DistilBERT `[CLS]` + 11 个结构特征 → 题目参数 $\boldsymbol\alpha_q,\mathbf b_q$ |
+| 模型表示 $z_m$ | 20 维能力 $\boldsymbol\theta_m$ |
+| 质量预测 $\widehat P(q,m)$ | 多维二参数 IRT |
+| 成本 $\widehat C(q,m)$ | **逐题**估计：输出长度 × 单价；另估延迟 $\widehat T$ |
+| 决策 | $w_p\widehat P-w_c\widehat C-w_t\widehat T$，可加整批约束 |
+| 新模型接入 | 做 200 道 D-optimal 锚点题，拟合 $\boldsymbol\theta_{\text{new}}$，不重训路由网络 |
+| 主指标 | Reward（按三组权重分别计算） |
 
-作者从 Open LLM Leaderboard 收集 200 个旧模型在分布内数据集上的表现，先用多维二参数 IRT 拟合一个共同坐标系。每个模型有 20 维能力向量 $\boldsymbol\theta_m$；每道题有 20 维区分度 $\boldsymbol\alpha_q$ 和难度 $\mathbf b_q$。作答成功概率由下面的式子给出：
+题名里的 zero-shot 指的是“不用重训路由预测网络”，**不是**新模型一题都不用测。
 
-$$
-\widehat P_{mq}
-=\sigma\!\left(\boldsymbol\alpha_q^\top
-(\boldsymbol\theta_m-\mathbf b_q)\right).
-$$
+## 1. 先建共享坐标，再让新题、新模型进入坐标
 
-可以把它理解成：模型在各个潜在能力方向上，距离这道题的要求还有多远，再由区分度决定这些方向对作答结果有多大影响。这些维度是从成绩中拟合出来的，不能直接把每一维都当成已经验证的“数学能力”或“编程能力”。与 IRT-Router 的 MIRT 写法相比，这里的难度 $\mathbf b_q$ 是向量，进入内积；后者的 $\sigma(\mathbf a_q^\top\boldsymbol\theta_m-b_q)$ 使用标量难度。两种写法相近，但参数含义并不相同。[概率公式与参数定义](translations/04_ZeroRouter_中文译文.md#s3-1-1-calibration)
-
-旧题有成绩数据，可以拟合坐标；用户刚提出的新题没有这些数据。为此，ZeroRouter 又训练了一个“文本到题目坐标”的预测器。输入一方面来自微调后的 DistilBERT `[CLS]` 语义表示，另一方面是 11 个结构特征，例如可读性和句法树深度。共享网络融合它们后，难度头预测相对平均难度的残差，区分度头则把 20 个维度按相关性分组，用多个小专家分别预测。这一步把“在历史成绩上拟合题目”接到了“只读新题文字也能估计题目属性”。[混合特征](translations/04_ZeroRouter_中文译文.md#s3-2-1) · [两个预测头](translations/04_ZeroRouter_中文译文.md#s3-2-2-difficulty-head)
-
-训练并不轻到可以忽略：IRT 部分采用层次贝叶斯设定和随机变分推断，用 `py-irt` 实现，训练 6,000 个 epoch，Adam 初始学习率 0.1，每 100 个 epoch 乘 0.99；66M 参数的 DistilBERT 预测器微调 40 个 epoch，batch 为 32，学习率为 $3\times10^{-5}$。作者报告使用单张 A800 80GB。所谓轻量接入，是这个公共空间和预测器已经建立之后的工作量。[训练配置](translations/04_ZeroRouter_中文译文.md#s4-1-implementation)
-
-## 2. 200 道锚点怎样选，为什么不算自适应测试？
-
-共享坐标系建好后，新模型只需要补上自己的能力向量。问题变成：拿哪一小批题来测它，才能减少重复、尽量覆盖不同的能力方向？ZeroRouter 使用 D-optimal 设计，选择让区分度外积之和的对数行列式最大的锚点集合：
-
-$$
-\mathcal A^*=\underset{\mathcal A\subset\mathcal P,\ |\mathcal A|=N}
-{\arg\max}\ \log\det\!\left(
-\sum_{q\in\mathcal A}\boldsymbol\alpha_q\boldsymbol\alpha_q^\top
-\right).
-$$
-
-直观地说，反复出很多近似题，可能只测清了同一个方向；这个目标鼓励所选题在潜在能力方向上提供互补信息。实际算法从 $\epsilon I$ 开始，逐题加入使目标增益最大的候选，直到达到预算。[锚点选择与贪心算法](translations/04_ZeroRouter_中文译文.md#s3-1-1-anchor-selection)
-
-这里有一个重要简化。完整 Fisher 信息中的单题贡献是 $p(1-p)\boldsymbol\alpha\boldsymbol\alpha^\top$，其中 $p$ 依赖新模型的未知能力。为了提前选题，作者去掉了概率因子，只用已经校准好的区分度向量。因此，这批锚点在新模型开始回答前就能确定，上一题答对还是答错不会改变下一题。它与 RADAR 根据最新能力估计逐步选题的做法不同；也不能把区分度矩阵的覆盖，直接等同于对所有新模型都最大的真实 Fisher 信息。[完整 Fisher 信息](translations/04_ZeroRouter_中文译文.md#eq-2) · [简化后的目标](translations/04_ZeroRouter_中文译文.md#eq-3)
-
-新模型完成锚点后，系统固定题目参数，通过最小化二元交叉熵拟合 $\boldsymbol\theta_{\mathrm{new}}$。原文将锚点得分记为 $y_k\in[0,1]$，并非要求每个数据源都只能提供严格的二值分数。这些调用同时用来统计输出长度和延迟参数。论文报告的新模型实验预算为 200 题，约占训练可见数据的 1%；这是实验设置，不意味着所有部署都必须固定用 200 题。[能力拟合](translations/04_ZeroRouter_中文译文.md#eq-5) · [接入预算](translations/04_ZeroRouter_中文译文.md#s4-4-onboarding)
-
-## 3. 从预测成绩走到真正选模型，还要估算钱和时间
-
-只估计答对概率，路由器容易总选能力最强、也最贵的模型。ZeroRouter 用同一个题目空间补上成本和延迟估计。把概率式中的内积展开，可得到 $\boldsymbol\alpha_q^\top\boldsymbol\theta_m-\boldsymbol\alpha_q^\top\mathbf b_q$；作者把 $s_q=\boldsymbol\alpha_q^\top\mathbf b_q$ 称为任务感知难度，并用它预测输出长度。[任务感知难度](translations/04_ZeroRouter_中文译文.md#eq-8)
-
-方法是为每个模型建立一张表：先把锚点题的 $s_q$ 分成 $K$ 个区间，再记录每个区间内的平均输出 token 数。新题落在哪个区间，就取该模型对应的均值作为长度估计。作为教学例子，如果某模型低难度区平均输出 80 token，高难度区平均输出 400 token，新题被分入高难度区后便按 400 估算；这只是经验均值，不是对单次回答长度的保证。输入长度则可直接用该模型的 tokenizer 计算。[长度分桶与查表](translations/04_ZeroRouter_中文译文.md#s3-1-2-calibration-bins)
-
-据此，费用与时间分别估计为：
+**拟合坐标系。** 收集 Open LLM Leaderboard 上 200 个旧模型在 ID 数据集上的成绩，拟合多维二参数 IRT：每个模型一个 20 维能力 $\boldsymbol\theta_m$，每道题一个 20 维区分度 $\boldsymbol\alpha_q$ 和 20 维难度 $\mathbf b_q$：
 
 $$
-\widehat C_{mq}
-=\lambda_m^{\mathrm{in}}\ell_{mq}^{\mathrm{in}}
-+\lambda_m^{\mathrm{out}}\widehat\ell_{mq}^{\mathrm{out}},
+\widehat P(q,m)=\sigma\!\left(\boldsymbol\alpha_q^\top(\boldsymbol\theta_m-\mathbf b_q)\right).
+$$
+
+可以理解为：模型在各能力方向上离题目要求还差多远，区分度决定各方向的权重。与 IRT-Router 的 MIRT 相比，这里难度是向量、写在括号里；MIRT 的 $\sigma(a_q^\top\theta_m-b_q)$ 用标量难度。写法相近，参数含义不同。[概率公式与参数](translations/04_ZeroRouter_中文译文.md#s3-1-1-calibration)
+
+**新题也要有坐标。** 用户新问的题没有历史成绩，于是再训练一个“题目文本 → 题目参数”的预测器：输入是微调后的 DistilBERT `[CLS]` 表示加 11 个结构特征（如可读性、句法树深度）；难度头预测相对平均难度的残差，区分度头把 20 维按相关性分组，用多个小专家分别预测。[混合特征](translations/04_ZeroRouter_中文译文.md#s3-2-1) · [两个预测头](translations/04_ZeroRouter_中文译文.md#s3-2-2-difficulty-head)
+
+**前期训练并不轻。** IRT 部分用层次贝叶斯 + 随机变分推断（`py-irt`），6,000 个 epoch，Adam 初始学习率 0.1、每 100 个 epoch 乘 0.99；66M 参数的 DistilBERT 预测器微调 40 个 epoch，batch 32，学习率 $3\times10^{-5}$；单张 A800 80GB。“轻量接入”指的是坐标系建好之后的事。[训练配置](translations/04_ZeroRouter_中文译文.md#s4-1-implementation)
+
+## 2. 锚点题怎么选：D-optimal
+
+坐标建好后，新模型只缺一个 $\boldsymbol\theta_{\text{new}}$。问题变成：用哪一小批题测它，才能各个能力方向都测到、又不重复？ZeroRouter 选使区分度外积之和的对数行列式最大的一组：
+
+$$
+\mathcal A^*=\underset{\mathcal A\subset\mathcal P,\ |\mathcal A|=N}{\arg\max}\ \log\det\!\left(\sum_{q\in\mathcal A}\boldsymbol\alpha_q\boldsymbol\alpha_q^\top\right).
+$$
+
+直观地说，一堆近似题只能测清同一个方向，这个目标鼓励选出方向互补的题。实现是贪心：从 $\epsilon I$ 起，每次加入增益最大的候选，直到预算用完。[锚点选择与贪心算法](translations/04_ZeroRouter_中文译文.md#s3-1-1-anchor-selection)
+
+**关键简化：去掉了 $p(1-p)$。** 一道题对能力估计的完整 Fisher 信息是 $p(1-p)\boldsymbol\alpha\boldsymbol\alpha^\top$，其中 $p$ 取决于新模型尚未知道的能力。为了能提前选题，作者把这个概率因子去掉，只用已校准的区分度。后果是：
+
+- 好处：题单在新模型开始答题前就能确定；
+- 代价：一道新模型几乎必对（或必错）的题，区分度再高也会被选上，而它其实提供不了多少信息。
+
+[RADAR](06_RADAR_精读核验.md) 的自适应测验恰好保留了这一项。这是主线上 ZeroRouter → RADAR 最清楚的一条连线。[完整 Fisher 信息](translations/04_ZeroRouter_中文译文.md#eq-2) · [简化后的目标](translations/04_ZeroRouter_中文译文.md#eq-3)
+
+**拟合能力。** 新模型做完锚点，固定题目参数，用二元交叉熵拟合 $\boldsymbol\theta_{\text{new}}$（得分 $y_k\in[0,1]$，允许非二值）。同一批调用还用来统计输出长度和延迟参数。论文实验预算为 200 题，约占训练可见数据的 1%。[能力拟合](translations/04_ZeroRouter_中文译文.md#eq-5) · [接入预算](translations/04_ZeroRouter_中文译文.md#s4-4-onboarding)
+
+## 3. 从预测成绩到选模型：钱和时间也要逐题估
+
+只看答对概率，路由器会总选最强最贵的模型。ZeroRouter 是六篇里唯一在**选模型时**就逐题估计费用和延迟的。
+
+把概率式里的内积展开得 $\boldsymbol\alpha_q^\top\boldsymbol\theta_m-\boldsymbol\alpha_q^\top\mathbf b_q$，作者把 $s_q=\boldsymbol\alpha_q^\top\mathbf b_q$ 叫作任务感知难度，用它预测输出长度：把锚点题的 $s_q$ 分成 $K$ 个区间，记录每个模型在各区间的平均输出 token 数，新题落在哪个区间就查哪个均值。例：某模型低难度区平均输出 80 token、高难度区 400 token（教学例子）。输入长度用该模型的 tokenizer 直接算。[任务感知难度](translations/04_ZeroRouter_中文译文.md#eq-8) · [长度分桶](translations/04_ZeroRouter_中文译文.md#s3-1-2-calibration-bins)
+
+$$
+\widehat C(q,m)=\lambda_m^{\mathrm{in}}\ell_{mq}^{\mathrm{in}}+\lambda_m^{\mathrm{out}}\widehat\ell_{mq}^{\mathrm{out}},
 \qquad
-\widehat T_{mq}
-=\mathrm{TTFT}_m+\widehat\ell_{mq}^{\mathrm{out}}\mathrm{TPOT}_m.
+\widehat T(q,m)=\mathrm{TTFT}_m+\widehat\ell_{mq}^{\mathrm{out}}\mathrm{TPOT}_m.
 $$
 
-$\lambda$ 是 API 的 token 单价，TTFT 是首 token 时间，TPOT 是每个输出 token 的生成时间；后两者也用锚点校准。路由发生在候选模型实际生成之前，所以这些量是在估计未来费用与时间。[费用公式](translations/04_ZeroRouter_中文译文.md#eq-6) · [延迟公式](translations/04_ZeroRouter_中文译文.md#eq-11)
+$\lambda$ 是 token 单价，TTFT 是首 token 时间，TPOT 是每个输出 token 的时间，后两者也由锚点校准。[费用公式](translations/04_ZeroRouter_中文译文.md#eq-6) · [延迟公式](translations/04_ZeroRouter_中文译文.md#eq-11)
 
-最终，每道题都必须选一个模型，优化目标是整个查询集合上的加权效用：
+**决策**是整批查询上的加权效用：
 
 $$
-\max_x\sum_q\sum_m x_{mq}
-\left(w_p\widehat P_{mq}-w_c\widehat C_{mq}-w_t\widehat T_{mq}\right),
-\qquad x_{mq}\in\{0,1\}.
+\max_x\sum_q\sum_m x_{mq}\left(w_p\widehat P_{mq}-w_c\widehat C_{mq}-w_t\widehat T_{mq}\right),\qquad x_{mq}\in\{0,1\}.
 $$
 
-论文还给出总成本、总延迟和最低平均准确率的可选约束。从这个公式可以推得：没有跨题约束时，各题独立选择效用最大的模型即可；有整批预算时，才需要联合安排。不能仅凭作者写了整数规划，就认定每个实验都启用了全局预算限制。[路由目标](translations/04_ZeroRouter_中文译文.md#eq-17) · [可选全局约束](translations/04_ZeroRouter_中文译文.md#eq-18)
+可选加总成本、总延迟、最低平均准确率约束。没有跨题约束时，各题独立选最优即可；有整批预算才需要联合求解。[路由目标](translations/04_ZeroRouter_中文译文.md#eq-17) · [可选全局约束](translations/04_ZeroRouter_中文译文.md#eq-18)
 
-实验中的三组权重 $(w_p,w_c,w_t)$ 分别为：准确率优先 $(0.8,0.1,0.1)$、成本优先 $(0.1,0.8,0.1)$、延迟优先 $(0.1,0.1,0.8)$。所以表里的 Max-Acc、Min-Cost、Min-Lat 都是对应策略下的 Reward，不能把 Max-Acc 列直接读成准确率。概率、费用和时间的量纲不同，公式又写成总和，而表值多为 0.x；复现时仍需核实实现中的单位、平均方式和缩放，不能自行补一个归一化系数来对齐结果。[评测指标](translations/04_ZeroRouter_中文译文.md#eq-19) · [实验权重](translations/04_ZeroRouter_中文译文.md#s4-1-policy-weights)
+实验用三组权重 $(w_p,w_c,w_t)$：Max-Acc $(0.8,0.1,0.1)$、Min-Cost $(0.1,0.8,0.1)$、Min-Lat $(0.1,0.1,0.8)$。表里三列都是对应权重下的 Reward，不是准确率。[评测指标](translations/04_ZeroRouter_中文译文.md#eq-19) · [实验权重](translations/04_ZeroRouter_中文译文.md#s4-1-policy-weights)
 
-## 4. 实验支持了什么，哪些数字最值得记？
+## 4. 实验
 
-主实验的 10 个核心模型分成两个各含 5 个模型的池，分别路由，并非一次 10 选 1：
+两个 5 模型池，分别路由（不是 10 选 1）：[模型池](translations/04_ZeroRouter_中文译文.md#s4-1-model-pool)
 
 | 小模型池 | 大模型池 |
-| --- | --- |
+|---|---|
 | Gemma-3-1B | Gemma-3-27B |
 | Gemma-3n-E4B | Qwen3-32B |
 | DeepSeek-R1-0528-Qwen3-8B | Mixtral-8×7B-Instruct |
 | Llama-3.1-8B-Instruct | DeepSeek-R1-Distill-Llama-70B |
 | Phi-4 | Qwen3-235B-A22B |
 
-另外 50 个训练截止后发布的模型用于动态接入评估，动态替换时保持 6 个候选。因而“共研究 60 个模型”不能写成“部署时同时 60 选 1”。分布内测试为 IFEval、BBH、MATH、GPQA、MuSR、MMLU-Pro；分布外测试为 ARC-Challenge、TruthfulQA、HumanEval。这里的 ID/OOD 是本论文的训练划分。[模型池](translations/04_ZeroRouter_中文译文.md#s4-1-model-pool) · [数据集](translations/04_ZeroRouter_中文译文.md#s4-1-datasets)
+另有 50 个训练截止后发布的模型用于动态接入，替换时保持 6 个候选。ID：IFEval、BBH、MATH、GPQA、MuSR、MMLU-Pro；OOD：ARC-Challenge、TruthfulQA、HumanEval。[数据集](translations/04_ZeroRouter_中文译文.md#s4-1-datasets)
 
-比较对象包括 RouteLLM、FORC、GraphRouter、Model-SAT、随机路由和单模型；正文基线段称能力指令微调方法为 CIT-LLM-Routing，表格使用 Model-SAT 名称。两组结果能帮助抓住论文的主张：
+基线：RouteLLM、FORC、GraphRouter、Model-SAT（正文也称 CIT-LLM-Routing）、随机路由、单模型。
 
-- 主表中，小模型池的 ID Max-Acc Reward 为 0.45，Model-SAT 为 0.43，GraphRouter 为 0.38；大模型池的 OOD Max-Acc Reward 为 0.68，Model-SAT 为 0.62。[表 1](translations/04_ZeroRouter_中文译文.md#table-1)
-- 在同为 200 题的新模型接入实验中，D-optimal 的 Max-Acc Reward 为 0.39，随机选题为 0.27，Model-SAT 为 0.38。D-optimal 的 Min-Cost、Min-Lat Reward 分别为 −0.34、−0.37。[表 2](translations/04_ZeroRouter_中文译文.md#table-2)
+- **主表**：小模型池 ID Max-Acc Reward 0.45（Model-SAT 0.43，GraphRouter 0.38）；大模型池 OOD Max-Acc Reward 0.68（Model-SAT 0.62）。[表 1](translations/04_ZeroRouter_中文译文.md#table-1)
+- **新模型接入（同为 200 题）**：D-optimal 的 Max-Acc Reward 0.39，随机选题 0.27，Model-SAT 0.38；D-optimal 的 Min-Cost、Min-Lat 为 −0.34、−0.37。[表 2](translations/04_ZeroRouter_中文译文.md#table-2)
 
-第二组结果支持锚点选择确实影响接入效果，但 0.39 不是 39% 准确率，也不能与 ICL-Router 报告的准确率直接横比。表中的 † 来自 $p<0.05$ 的 Wilcoxon 符号秩检验，只适用于被标记的比较，不代表每个单元格都显著，更不是换一个模型池仍能复现的保证。
+第二组是对主线最重要的结果：**同样 200 题，选哪些题会明显影响接入效果。** 表中 † 表示 Wilcoxon 符号秩检验 $p<0.05$，只适用于被标记的比较。
 
-动态实验让新模型依次替换旧模型，并保持主路由器不重训；图 3(a) 展示了这一过程中的表现。这比只预测新模型的平均成绩更接近持续更新候选池，但该实验没有单独比较“测完后拒绝接入新模型”的策略。图 3(d) 还展示任务感知难度与平均输出长度的单调关系，它支持这个成本估计信号有用，却不足以证明逐题长度误差很小、或候选费用排序总是正确。[动态池实验](translations/04_ZeroRouter_中文译文.md#s4-4-evolving-pool) · [图 3](translations/04_ZeroRouter_中文译文.md#fig-3)
+**动态池**：新模型依次替换旧模型，主路由器不重训（图 3(a)），比只预测新模型平均成绩更接近真实的持续更新。但没有比较“测完后拒绝接入”的策略。图 3(d) 显示任务感知难度与平均输出长度单调相关，支持这个成本信号有用，但不能说明逐题长度误差小。[动态池](translations/04_ZeroRouter_中文译文.md#s4-4-evolving-pool) · [图 3](translations/04_ZeroRouter_中文译文.md#fig-3)
 
-## 5. 如果沿着它做研究，先把选题目标和路由收益连起来
+## 5. 容易读错的地方
 
-这篇论文留下的一个值得检验的问题是：把新模型能力估得更准，是否一定带来更好的路由？D-optimal 优化的是能力识别所用的区分度矩阵，部署时真正关心的却是哪些题会因此改选模型、改选后质量和费用改变多少。可以在相同反馈预算下比较固定 D-optimal、随机选题，以及面向路由决策边界的选题，再看 Reward 或路由后悔值，不能只看能力向量的 RMSE。这是从估计目标与决策目标的差别提出的研究假说，论文还没有证明边界题一定更好。[选题目标](translations/04_ZeroRouter_中文译文.md#eq-3) · [路由目标](translations/04_ZeroRouter_中文译文.md#eq-17)
+- “共研究 60 个模型”不等于部署时 60 选 1。
+- 0.39 是 Reward，不是 39% 准确率，也不能和 ICL-Router 的准确率横比。
+- 公式写的是总和、概率与费用量纲不同，但表值多为 0.x；单位、平均方式和缩放需查实现，不能自行补归一化系数去对齐。
+- 200 是本文报告的预算，不是必须固定的数。
+- 正文提到附录，但现有文件没有附录。
 
-另一个起点是检验被省略的 $p(1-p)$：某个新模型若几乎总能答对一道题，这道题即使区分度大，也未必对它的能力估计有很多信息。比较静态设计与反馈引导选题是合理实验，但会直接涉及 RADAR 已有的自适应测试，不能仅凭“加入反馈”就声称新颖。预算方面也应先画 16、32、64 到 200 题的收益曲线，再讨论是否需要按模型决定停止时间；200 只是本文已报告的接入预算。
+## 6. 对主线研究的用处
 
-成本侧可以先测输出长度 MAE、费用排序错误和最终候选翻转，再判断是否值得换更复杂的回归头。现有的均值相关图不能证明长度误差已经主导路由失败。Reward 单位和归一化则是需要先查实现的复现问题，不宜包装成算法贡献。
+ZeroRouter 是我们研究问题最直接的出发点之一：它把“新模型接入”压缩成“在共享空间里估一个能力向量”，并且明确提出了一个选题目标。值得检验的地方（研究假说）：
 
-如果只有 8GB 显存，更实际的起点是保留预计算题目特征和成绩缓存，先复现锚点选择、能力拟合及最终效用，再决定是否重训文本预测器。这是复现路径建议，不是论文验证过的最低硬件要求。向导师概括时，最值得说明的变化是：ZeroRouter 把新模型接入压缩为共享空间中的能力估计，再将它接到质量、费用和时间的统一决策里；固定锚点是否最有利于最终决策，才是后续需要用实验回答的问题。
+- **估得准 ≠ 选得好。** D-optimal 优化的是能力识别所用的区分度矩阵；部署真正关心的是哪些题会因此改选模型、改选后质量和费用变多少。可以在同一反馈预算下比较固定 D-optimal、随机、以及面向路由决策边界的选题，看 Reward 或路由后悔值，而不只看 $\boldsymbol\theta$ 的 RMSE。
+- **被省略的 $p(1-p)$。** 加回反馈信息就会碰到 RADAR 的自适应测验，单凭“加入反馈”不能算新意。
+- **预算曲线。** 先画 16、32、64 到 200 题的收益曲线，再讨论是否需要按模型决定何时停测。
+- **成本侧。** 先测输出长度 MAE、费用排序错误和最终候选翻转，再判断要不要换更复杂的回归头。
+
+8GB 显存下的起点：保留预计算的题目特征与成绩缓存，先复现锚点选择、能力拟合和最终效用，再决定是否重训文本预测器。
+
+**下一站：** [05 ICL-Router](05_ICL-Router_精读核验.md) 也用固定题单，但不估 IRT 参数，而是把新模型的答题记录直接交给一个训练过的 LLM 路由器去读。
