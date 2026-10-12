@@ -1,312 +1,121 @@
 # ICL-Router：给每个模型一份 500 道题的“成绩册”，让 7B 路由器自己学会读
 
-> 英文题名：**ICL-Router: In-Context Learned Model Representations for LLM Routing**  
-> 中文阅读：[同仓库中文 PDF](pdfs/zh/ICL-Router_Chinese.pdf#page=1)。  
-> 英文来源：[arXiv:2510.09719v3（英文原文）](https://arxiv.org/html/2510.09719v3)。  
-> 核验依据：库中 `ICL-Router.pdf`，§3–§4、图 1–5、表 1–4、附录 A.2–A.5。  
-> 标记：**[原文]** 直接证据；**[推导]** 根据方法/公式解释；**[待实验]** 候选问题；**[待文献]** 需检索最新相关工作。
+ICL-Router 想解决的是：模型池不断加入新成员时，路由器怎样知道新模型擅长什么，又不用每次都重新训练？RouterDC、EmbedLLM 这类方法为固定模型池学习表示，增加模型时通常要重训；MODEL-SAT 虽然允许动态接入，但依赖人工设计的能力描述。ICL-Router 改的是“怎样表示候选模型”：让所有候选回答同一套代表性题目，把题目向量与答对、答错的记录组合成能力档案，再训练一个 7B LLM 路由器学会读取这些档案。遇到新查询时，它预测每个候选答对的概率，选择概率最高的模型作答。新模型只需补齐自己的答题记录，就能参与这一决策。这里的“上下文学习”建立在专门训练过的路由器上，不能理解成把任意向量交给未经训练的 LLM，它就自然会选模型。[中文方法概述](translations/05_ICL-Router_中文译文.md#s3-1)
 
-## 中文 PDF 定位导航
+全文：[中文译文](translations/05_ICL-Router_中文译文.md) · [两阶段框架图](translations/05_ICL-Router_中文译文.md#fig-1) · [英文论文 v3](https://arxiv.org/abs/2510.09719v3)
 
-- 阅读优先：下文先链接同仓库中文 PDF，英文链接仅用于对照核验。**GitHub 的 PDF 预览可能忽略 `#page=N`；如未跳页，请下载 PDF 或用本地阅读器打开，并跳到链接文字注明的物理页。**
-- 中译依据：Library 中现有 `ICL-Router_中文译本_含完整图表公式.pdf`，15 页，非官方中文学习译本，首页明确按 v3 翻译。
-- 英文核验：`ICL-Router.pdf`，11 页；首页为 **arXiv:2510.09719v3 [cs.LG], 14 Nov 2025**。[固定版本原文 PDF](https://arxiv.org/pdf/2510.09719v3#page=1)。
-- 页码口径：下文“中译 PDF 第 N 页”和“原文 PDF 第 N 页”都指从首页起 **1-based 物理页**。中译正文页脚1–11及附录14–15与物理页一致；中译第12–13页标作 References 1/2、2/2，不能把它们当全文页码1/2。英文页码按文件物理位置计，不与中译混用。
-- 原文章号、式号、图表号均沿用英文 v3。附录 A.1 的数据表在英文重新编号为 **Table 1**（物理第10页），中译叫 **表A.1**（物理第14页），与正文 Table 1 区分。中译第9–10页的图数值对照表是译者整理，主要数值已经对照英文原图。
-- “原文事实”只表示作者写明；“本文讲解/推导”是解释或公式推论；“范围核验”限于所列本版章节；“待实验/待文献”尚未成立。Ctrl+F中文词用于中译，英文词用于原文。
+<a name="query-reconstruction"></a>
 
-| 要找什么 | 中文 PDF 一键定位（物理页） | 英文核验（辅助） | 章、式、图表或关键词 |
-|---|---:|---|---|
-| QRT与重构损失 | [第 4 页](pdfs/zh/ICL-Router_Chinese.pdf#page=4) | [原文第3–4页](https://arxiv.org/pdf/2510.09719v3#page=3) | §3.2；Eq.(1–3) |
-| 能力档案、Yes/No预测与接入 | [第 4–5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=4) | [原文第4页](https://arxiv.org/pdf/2510.09719v3#page=4) | §3.3–3.4；Eq.(4–6) |
-| 冻结8B embedding、7B router与训练 | [第 5–6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5) | [原文第4–5页](https://arxiv.org/pdf/2510.09719v3#page=4) | §4.2；Implementation Settings |
-| 初始8模型与ID/OOD主表 | [第 6–7 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6) | [原文第5页](https://arxiv.org/pdf/2510.09719v3#page=5) | Tables 1–2 |
-| 新增5模型、76.3→79.9 | [第 8–9 页](pdfs/zh/ICL-Router_Chinese.pdf#page=8) | [原文第6页](https://arxiv.org/pdf/2510.09719v3#page=6) | §4.5；Figures 2–3 |
-| 4096维、题数消融、QRT消融 | [第 10–11 页](pdfs/zh/ICL-Router_Chinese.pdf#page=10) | [原文第7页](https://arxiv.org/pdf/2510.09719v3#page=7) | Table 3；Figures 4–5；Table 4 |
-| 数据规模、500题选法、开销与局限 | [第 14–15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=14) | [原文第10–11页](https://arxiv.org/pdf/2510.09719v3#page=10) | Appendix A.1–A.5；125；8 tokens |
+## 先让路由器读懂题目向量，再教它判断模型能力
 
-
-### 附录精确位置（只补定位，不新增翻译）
-
-现有中文 PDF 已包含此前完成的附录译文，本次原样沿用，不新增或重译附录。下面给出原附录编号、段落和两种文件的物理页；A.3–A.5 都只有一段，按各节内的自然段计数。
-
-| 原附录 | 具体段落/对象 | 中文汇编位置（已有内容） | 英文原文位置 |
-|---|---|---|---|
-| A.1 Datasets | 数据表 Table 1（中译表A.1）；10个数据集的名称开头条目 | [第14页表A.1](pdfs/zh/ICL-Router_Chinese.pdf#page=14)；[第15页顶部 AGIEval、HumanEval 续项](pdfs/zh/ICL-Router_Chinese.pdf#page=15) | [第10页 A.1 及 Table 1](https://arxiv.org/pdf/2510.09719v3#page=10) |
-| A.2 Baselines | 第1段 LLM Router；第2段 RouterDC；第3段 EmbedLLM；第4段 MODEL-SAT。八张A800在第2、4段 | [第15页 A.2](pdfs/zh/ICL-Router_Chinese.pdf#page=15) | [第10页末 LLM Router 起段](https://arxiv.org/pdf/2510.09719v3#page=10)；[第11页续段与其余三段](https://arxiv.org/pdf/2510.09719v3#page=11) |
-| A.3 Challenging Query Set Construction | 第1段（唯一段）；检索“To construct the set of 500 challenging queries”或“125” | [第15页 A.3](pdfs/zh/ICL-Router_Chinese.pdf#page=15) | [第11页左栏 A.3](https://arxiv.org/pdf/2510.09719v3#page=11) |
-| A.4 Cost Evaluation | 第1段（唯一段）；检索“Although we use a 7B-scale model as the router”或“8 tokens” | [第15页 A.4](pdfs/zh/ICL-Router_Chinese.pdf#page=15) | [第11页左栏 A.4](https://arxiv.org/pdf/2510.09719v3#page=11) |
-| A.5 Limitations | 第1段（唯一段）；检索“Due to limitations in computational resources”或“small-parameter” | [第15页 A.5](pdfs/zh/ICL-Router_Chinese.pdf#page=15) | [第11页左栏底部起、右栏顶部续](https://arxiv.org/pdf/2510.09719v3#page=11) |
-
-
-## 先用一个故事理解
-
-有 8 个擅长领域各异的同学，你不知道谁适合某道新题。传统方法可能把每个人压成一个“数学 80、编程 70”的短向量。ICL-Router 另辟一条路：**让每个人完成同一套 500 道有区分度的题，保留“什么题、答对还是答错”的记录，交给一个经过训练的 LLM 路由器阅读。**
-
-【定位·原文设定＋教学类比：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.3 ICL Model Routing Training，Eq.(4–5)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“能力画像”／原文“capability profile”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”。8位同学、数学80/编程70均为自拟比喻，非论文数据。】
-
-一个模型在逻辑题上对得多，另一个在数学题上对得多，7B 路由器不必先得到明确命名的“逻辑能力维度”，它尝试从整份成绩册中学习模式，然后判断新题交给谁。
-
-【定位·本文讲解：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.3 ICL Model Routing Training，Eq.(4–5)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“能力画像”／原文“capability profile”；另见：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §4.2 Implementation Settings（QRT设置），[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“两层”／原文“two-layer”。逻辑与数学成绩模式为示意；7B模型型号是作者设置。】
-
-亮点是**新模型只需要完成同一套题并建立成绩册，不用重新训练核心路由器**。代价是：路由时要运行一个相对昂贵的 7B 路由器，并读取一套比 IRT 向量大得多的能力表示。本文几乎不研究费用—质量权衡，主要追求准确率。
-
-【定位·原文事实＋本文开销判断：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.4 Cost Evaluation，第 1 段（本节唯一段；首句以“Although we use a 7B-scale model as the router”开头，含8 tokens），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“8 个词元”／原文“8 tokens”。7B运行与档案处理是结构事实；“相对昂贵”未有本文与IRT的同硬件量化对照，不作为实验胜负结论。】
-
-## ① 候选空间：初始 8 个接近同尺寸模型，再加入 5 个
-
-[原文，§4.2、表 1]
-
-**初始 8 个模型**：DeepSeek-R1-Distill-Qwen-7B、Llama-3.1-8B-Instruct、Llama-3.1-Nemotron-Nano-8B、Qwen2.5-7B-Instruct、cogito-v1-preview-llama-8B、Gemma-2-9B-IT、InternLM3-8B-Instruct、GLM-4-9B-Chat。它们大多为 7B–9B 级别的开源模型。
-
-【定位·原文事实：[中译 PDF 第 6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6)；原文 Table 1（ID准确率与原始8模型），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“76.30”／原文“76.30”。表1的正式型号为Llama-3.1-Nemotron-Nano-8B-v1。】
-
-**逐步加入的 5 个新模型**：[原文，§4.5] Falcon-H1-7B-Instruct、Gemma3-12B-IT、DeepSeek-R1-Llama-8B、OpenThinker3-7B、AceReason-Nemotron-1.1-7B。
-
-【定位·原文事实：[中译 PDF 第 8–9 页](pdfs/zh/ICL-Router_Chinese.pdf#page=8)；原文 §4.5 Scalability to New Models，Figures 2–3，[原文 PDF 第 6 页](https://arxiv.org/pdf/2510.09719v3#page=6)；Ctrl+F：中译“Gemma3-12B”／原文“Gemma3-12B”。新增列表位于§4.5文字，不在初始8模型Table 1中。】
-
-所以旧笔记“8 个都是 7–9B”可以作为初始池描述；**不能说加入新模型后所有候选仍都为 7–9B**，因为新模型中明确包含 12B。
-
-【定位·本文集合范围澄清：[中译 PDF 第 6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6)；原文 Table 1（ID准确率与原始8模型），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“76.30”／原文“76.30”；另见：[中译 PDF 第 8–9 页](pdfs/zh/ICL-Router_Chinese.pdf#page=8)；原文 §4.5 Scalability to New Models，Figures 2–3，[原文 PDF 第 6 页](https://arxiv.org/pdf/2510.09719v3#page=6)；Ctrl+F：中译“Gemma3-12B”／原文“Gemma3-12B”。12B是新增Gemma3，不是初始八模型之一。】
-
-**重要实验边界**：作者选择的是小参数规模相近的模型池，并未展示强烈不同价位的闭源 API 模型之间的成本最优化。因此这篇论文的目标不是 ZeroRouter 那样同时最优化质量、美元和延迟。[原文，附录 A.5]
-
-【定位·原文范围＋跨论文目标对照：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.5 Limitations，第 1 段（本节唯一段；首句以“Due to limitations in computational resources”开头，原文从左栏底部续至右栏顶部），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“小参数规模”／原文“small-parameter”；另见：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”；另见：另文 `ZeroRouter_Chinese_Full_Translation.pdf`：[中译 PDF 第 7 页](pdfs/zh/ZeroRouter_Chinese.pdf#page=7)；原文 Multi-Objective Optimization，Eq.(17–18)；中译§3.3.1，[原文 PDF 第 4 页](https://arxiv.org/pdf/2601.06220v1#page=4)；Ctrl+F：中译“可选全局约束”／原文“optional global”。A.5只承认小参数池；没有API价格跨度实验是本版实验范围核验，不是A.5逐字结论。】
-
-## ② 题目表示：第一阶段为什么要“复述题目”？
-
-[原文，§3.2、§4.2]
-
-对每道题 `q`，先用**冻结的 `Qwen3-Embedding-8B`**编码为约 **4096 维**语义向量 `e(q)`，再由**两层 MLP 投影器**映射到 `Qwen2.5-7B-Instruct` 路由器的输入表示空间：
-
-【定位·原文事实：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §4.2 Implementation Settings（QRT设置），[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“两层”／原文“two-layer”；另见：[中译 PDF 第 10 页](pdfs/zh/ICL-Router_Chinese.pdf#page=10)；原文 §4.6，Table 3（8B/4096），[原文 PDF 第 7 页](https://arxiv.org/pdf/2510.09719v3#page=7)；Ctrl+F：中译“8B/4096”／原文“8B/4096”。4096维在Table 3而不是§4.2明确列出；embedding冻结，路由器并非冻结。】
+把几百道题的全文都放进上下文，长度和计算量会很快增加。论文先用冻结的 Qwen3-Embedding-8B 把每道题编码为 4096 维向量，再由两层 MLP 投影到 Qwen2.5-7B-Instruct 路由器的输入空间：
 
 $$
-\mathbf e=f_{emb}(q),\qquad\mathbf v=f_{proj}(\mathbf e).
+\mathbf e_n=f_{\mathrm{emb}}(q_n),\qquad
+\mathbf v_n=f_{\mathrm{proj}}(\mathbf e_n).
 $$
 
-【定位·原文公式改记号：[中译 PDF 第 4 页](pdfs/zh/ICL-Router_Chinese.pdf#page=4)；原文 §3.2 Query Reconstruction Training，Eq.(1–3)，[原文 PDF 第 3–4 页](https://arxiv.org/pdf/2510.09719v3#page=3)；Ctrl+F：中译“重构损失”／原文“reconstruction loss”。对应Eq.(1–2)。】
+问题在于，维度对上并不代表路由器能理解向量。embedding 模型与自回归 LLM 的表示空间不同，因此第一阶段安排了查询重构训练（QRT）：路由器只根据投影后的向量，逐词生成原来的题目。为了把题目复述出来，投影器必须保留路由器可用的语义，路由器也要学会解释这种输入。重构是为后面的选模型做准备，还不是最终的路由任务。[公式（1）–（3）及说明](translations/05_ICL-Router_中文译文.md#s3-2)
 
-为什么不直接把 4096 维向量塞给路由器？因为 embedding 模型的坐标系和 7B 自回归模型的内部词向量空间不一定一致。**第一阶段 Query Reconstruction Training（QRT）就像让路由器学习一种“向量方言”**：投影器给它一个题目向量，它要把原题文本重新生成出来。这不是研究目标本身，而是让投影器和路由器掌握题目语义的预训练任务。
-
-【定位·原文动机＋教学类比：[中译 PDF 第 4 页](pdfs/zh/ICL-Router_Chinese.pdf#page=4)；原文 §3.2 Query Reconstruction Training，Eq.(1–3)，[原文 PDF 第 3–4 页](https://arxiv.org/pdf/2510.09719v3#page=3)；Ctrl+F：中译“重构损失”／原文“reconstruction loss”。“向量方言”是本笔记比喻，不是论文术语。】
-
-[原文，Eq.(3)] 重建阶段的损失是逐 token 自回归交叉熵，目标是原问题中的真实词：
+论文的重构损失写为：
 
 $$
-\mathcal L_{rec}=-\frac{1}{N}\sum_n\frac{1}{T_n}\sum_{t=1}^{T_n}
-\log P(q_n^{(t)}\mid q_n^{(<t)},\mathbf v_n).
+\mathcal L_{\mathrm{rec}}(\theta_{\mathrm{proj}},\theta_{\mathrm{router}})
+=-\frac{1}{NT_n}\sum_{n=1}^{N}\sum_{t=1}^{T_n}
+\log P\!\left(q_n^{(t)}\mid q_n^{(<t)},\mathbf v_n\right).
 $$
 
-【定位·本文规范化示意，非原式照抄：[中译 PDF 第 4 页](pdfs/zh/ICL-Router_Chinese.pdf#page=4)；原文 §3.2 Query Reconstruction Training，Eq.(3)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“重构损失”／原文“reconstruction loss”。原文Eq.(3)将1/(N T_n)放在求和外。这里将1/T_n放入n求和，是解释性改写；不能据此声称loss reduction与原实现相同。】
+其中，$q_n^{(t)}$ 是原题的第 $t$ 个词元，$T_n$ 是该题长度。这个式子的外部分母含有同时出现在求和中的 $T_n$，归一化记号确实有歧义。这里保留论文写法；若要复现，应检查实现中的 token mask 和 loss reduction，不能自行换成“先按题平均、再全局平均”后仍称其为原式。[译本保留的公式提示](translations/05_ICL-Router_中文译文.md#eq-3-normalization-note)
 
-上面按“每题平均 token 损失、再平均题目”写清常见规范化意图；论文印刷公式的前因子排版略紧凑，**复现时应以实际代码的数据和 token mask 为准**，不要仅凭这个说明重写完全一致的 loss reduction。
+QRT 先单独训练投影器 1 个 epoch，学习率为 $2\times10^{-5}$；随后联合训练投影器与路由器 2 个 epoch，路由器学习率为 $5\times10^{-6}$。这 1+2 个 epoch 都属于第一阶段，8B embedding 模型始终冻结。第二阶段还会继续训练投影器和 7B 路由器，不能把整个方法记成只训练投影器或分类头。[训练设置](translations/05_ICL-Router_中文译文.md#s4-2)
 
-【定位·范围核验／待代码：[中译 PDF 第 4 页](pdfs/zh/ICL-Router_Chinese.pdf#page=4)；原文 §3.2 Query Reconstruction Training，Eq.(3)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“重构损失”／原文“reconstruction loss”。已目视原文第4页Eq.(3)；归一化歧义客观存在，尚未查看实现的mask与reduction。】
+<a name="capability-profiles"></a>
 
-训练配置：[原文，§4.2] 先单独训练 projector **1 个 epoch**（学习率 `2×10⁻⁵`），再与 7B 路由器联合训练 **2 个 epoch**（路由器学习率 `5×10⁻⁶`）。上述 1+2 epoch 都属于第一阶段 QRT；第二阶段另外训练 5 个 epoch，才学“该不该选这个候选模型”。
+## 500 道题怎样变成能力档案，档案又怎样决定路由
 
-【定位·原文事实＋校订：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §4.2 Implementation Settings（QRT设置），[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“两层”／原文“two-layer”。1 epoch仅投影器、随后2 epoch联合训练均在第一阶段QRT内；真正第二阶段见中译第6页/原文第5页的5 epochs。】
-
-## ③ 模型表示：不是 25 维 θ，而是同一套 500 条 Yes/No 记录
-
-[原文，§3.3、Eq.(4)] 每个模型 M 的档案为：
+“成绩册”保留的不只是模型得了多少分，还保留它在哪些题上答对、在哪些题上答错。对模型 $M$，可以把能力档案写成：
 
 $$
-\mathbf P_M=\big((\mathbf v_1,c_{1M}),\ldots,(\mathbf v_{500},c_{500,M})\big),
-\qquad c_{kM}\in\{\text{Yes},\text{No}\}.
+\mathbf P_M=
+\big((\mathbf v_1,c_{1M}),\ldots,(\mathbf v_K,c_{KM})\big),
+\qquad c_{kM}\in\{\mathrm{Yes},\mathrm{No}\}.
 $$
 
-【定位·原文公式代入实验K值：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.3 ICL Model Routing Training，Eq.(4–5)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“能力画像”／原文“capability profile”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”。Eq.(4)写一般K；K=500来自§4.2与A.3，不是架构恒定长度。】
+这里的 $\mathbf v_k$ 来自题目向量，$c_{kM}$ 是模型在这道题上的真实对错标签；下标 $M$ 只是为讲解时区分不同模型，原式在固定模型的档案中将标签记作 $c_k$。主实验取 $K=500$，所有候选使用同一套题，所以模型之间的记录可以直接对照。路由器由此有机会学到“在哪类题上表现好”的模式，不必先人为命名每一个能力维度。[能力档案与原公式（4）](translations/05_ICL-Router_中文译文.md#s3-3)
 
-其中 `v_k` 是第 k 道测试题被 embedding+projector 变换后的向量，`Yes/No` 表示模型回答是否正确。**所有模型使用相同的 500 道题**，这很重要：因为分母、考题、比较尺度一致，成绩记录可对齐。
+这 500 道题有明确的筛选规则。作者根据旧模型池中 8 个模型的表现，分别抽取恰好有 1、2、3、4 个模型答对的题，各 125 道。这些题来自所有对照方法都能使用的训练集，没有额外引入数据。按这一规则，0 个或 5–8 个模型答对的题都不在档案题单中。因此，它不能被概括为“随机选 500 道题”，也不等同于覆盖所有模型分歧题。作者解释了全对、全错的题缺少区分度，但这一解释本身没有证明排除 5–7 个模型答对的题就是最优选择。[附录 A.3：选题规则](translations/05_ICL-Router_中文译文.md#app-a-3)
 
-【定位·原文事实＋本文解释：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.3 ICL Model Routing Training，Eq.(4–5)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“能力画像”／原文“capability profile”；另见：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”。same query set Q写在§3.4；“比较尺度可对齐”为本文解释。】
-
-### 这 500 道题是怎么挑出来的？
-
-[原文，附录 A.3] 不是简单挑“8 个模型分歧最大”的前 500，也不是从全部训练题中简单均匀随机得到的题单。作者从旧池 8 个模型的训练题表现中建立四组：
-
-【定位·原文事实＋边界：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”。原文只规定每组125道，没有披露每组内部究竟如何抽取；不能由此排除组内随机采样。】
-
-| 一道题被 8 个旧模型中几人答对 | 抽取数量 |
-|---|---:|
-| **恰好 1 人** | 125  【定位·原文数值：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”】 |
-| **恰好 2 人** | 125  【定位·原文数值：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”】 |
-| **恰好 3 人** | 125  【定位·原文数值：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”】 |
-| **恰好 4 人** | 125  【定位·原文数值：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”】 |
-| **总计** | **500**  【定位·原文数值：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”】 |
-
-这意味着**恰好 5、6、7、8 人答对的题，以及 0 人答对的题，都不在这套选题规则里**。论文认为只要大家都对或都错，往往难以区分能力；但为什么不选“恰好 5–7 人答对”的题？作者没有用系统的对照充分解释。它是一个可验证的设计选择，不等于所有分歧题都同等有价值。[原文 + 推导]
-
-【定位·原文规则的推论＋范围核验：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”。排除0及5–8由所列四组推出；为什么排除5–7以及它们是否更有效，A.3未给对照，本文保留为问题。】
-
-相比其他论文，这个“模型表示”的信息量较大：IRT/RADAR 几十个或单个参数，ICL 则保留 500 个题目语义和答题结果，使 7B 网络自己综合。**表达力可能更强，但读取成本随示例数和模型池增长。**
-
-【定位·跨论文结构对照＋待实验：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.3 ICL Model Routing Training，Eq.(4–5)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“能力画像”／原文“capability profile”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”；另见：另文 `IRT-Router_中文译文_含图表与公式.pdf`：[中译 PDF 第 10 页](pdfs/zh/IRT-Router_Chinese.pdf#page=10)；原文 IRT-Router §5.5 Implementation Details，[原文 PDF 第 7 页](https://arxiv.org/pdf/2506.01048v2#page=7)；Ctrl+F：中译“25”／原文“25”；另见：另文 `RADAR_中文译本_正文.pdf`：[中译 PDF 第 6–7 页](pdfs/zh/RADAR_Chinese_Body.pdf#page=6)；原文 RADAR §3.5，Eq.(7–9)，[原文 PDF 第 6–7 页](https://arxiv.org/pdf/2509.25426v3#page=6)；Ctrl+F：中译“当前能力估计”／原文“Fisher information”。25维及标量分别来自IRT-Router与RADAR；更强表达力、实际读取开销增幅均非本文已测结论，需控制缓存/批处理。】
-
-## ④ 性能预测：不是 IRT 公式，而是 7B 路由器判断 Yes 的概率
-
-[原文，§3.3–§3.4、Eq.(5)(6)] 第二阶段把某个模型的 `500 条成绩册 + 当前问题的向量` 输给 `Qwen2.5-7B-Instruct`，训练它判断：“这个模型回答这条新题，会正确吗？”
-
-【定位·原文事实：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.3 ICL Model Routing Training，Eq.(4–5)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“能力画像”／原文“capability profile”；另见：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”；另见：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §4.2 Implementation Settings（QRT设置），[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“两层”／原文“two-layer”。Eq.(5)为分类交叉熵，Eq.(6)以Yes概率选择模型。】
+第二阶段训练时，路由器读取某个候选的能力档案和当前查询表示，预测“这个候选能否答对当前题”。监督信号是候选模型真实的答题结果，投影器与路由器共同最小化交叉熵损失。训练 5 个 epoch，两者学习率分别为 $1\times10^{-5}$ 和 $2\times10^{-6}$，batch size 为 32。对预测与决策过程，可以用下面两式概括：
 
 $$
-\widehat P(M,q)=P_{router}(\text{Yes}\mid\mathbf P_M,q),
+\widehat p(M,q)=P_{\mathrm{router}}(\mathrm{Yes}\mid\mathbf P_M,q),
 \qquad
-M^*(q)=\arg\max_M\widehat P(M,q).
+M^*(q)=\arg\max_{M\in\mathcal M}\widehat p(M,q).
 $$
 
-【定位·原文决策式的解释性记号：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”。能力画像P_M写入条件是根据§3.4文字展开，原式条件写M_t,q′。】
+第一式把原文的条件概率写成便于阅读的形式，第二式对应最终选择规则。路由时使用的是预先建立的档案，不需要先让全部候选试答当前题；选定候选后，再由它生成正式回答。[训练损失（5）](translations/05_ICL-Router_中文译文.md#eq-5) · [决策公式（6）](translations/05_ICL-Router_中文译文.md#eq-6)
 
-它**并非在测试时先让全部候选 LLM 试答当前题**；7B 路由器读的是事先建立的档案和当前题表示。只执行最终选择的候选生成正式答案。
+举个示意例子：新题要求分析一段程序的边界行为。模型 A 的历史记录显示，它在相关逻辑与程序题上表现较好；模型 B 的普通常识题成绩更高。路由器可能分别给出 0.78 和 0.42 的答对概率，于是选择 A。这两个数字仅用于解释流程，并非论文结果；它们来自训练后的路由器预测，不是把平均分代入一个手写规则算出来的。
 
-【定位·原文流程解读：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”。区分预先能力测评和当前查询正式生成；不是让候选全部作答后再选。】
+<a name="new-model-incorporation"></a>
 
-[原文，§4.2] 第二阶段训练 **5 个 epoch**，同时更新投影器和路由器，二者学习率分别 `1×10⁻⁵` 和 `2×10⁻⁶`，batch 32。不要误记成“仅训练分类头，7B 冻结”。
+## 新模型只补档案，但最初的路由器仍然需要训练
 
-【定位·原文事实：[中译 PDF 第 6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6)；原文 §4.2 Implementation Settings（续页），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“五个epoch”／原文“five epochs”。训练描述接在原文第4页之后的第5页，五个epoch属第二阶段。】
+新模型加入时，让它回答原先那套固定题目，取得 Yes/No 标签，再与已有题目向量组成新档案。此后，路由器就可以像评价旧模型一样评价它，不必因为新增候选而更新投影器和 7B 路由器的参数。题单是提前确定的，不会根据新模型前一道题的表现实时改选下一道题。“无需重训”说的是新模型接入这一环节；初始的两阶段训练，以及新模型回答档案题目的评估开销，仍然存在。[推理与接入流程](translations/05_ICL-Router_中文译文.md#s3-4)
 
-### 一个简单的理解例子（不是原文数据）
+主实验的初始池有 8 个开源模型：DeepSeek-R1-Distill-Qwen-7B、Llama-3.1-8B-Instruct、Llama-3.1-Nemotron-Nano-8B-v1、Qwen2.5-7B-Instruct、cogito-v1-preview-llama-8B、Gemma-2-9B-IT、Internlm3-8B-Instruct 和 GLM-4-9B-Chat，规模集中在 7B–9B。扩展实验依次加入 Falcon-H1-7B-Instruct、Gemma3-12B-IT、DeepSeek-R1-Llama-8B、OpenThinker3-7B、AceReason-Nemotron-1.1-7B。因此，“全部候选都是 7B–9B”只适用于初始池，扩展后包含 12B 模型。[初始候选](translations/05_ICL-Router_中文译文.md#table-1) · [新增模型](translations/05_ICL-Router_中文译文.md#s4-5)
 
-问：“证明一段程序在边界输入下不会死循环”。模型 A 的成绩册显示它在程序验证、逻辑推理相似题上大多正确；模型 B 虽然普通常识题正确率更高，在这些题上却经常错。7B 路由器可能输出 `P(Yes|A,q)=0.78`、`P(Yes|B,q)=0.42`，于是选择 A。这里 0.78/0.42 是模型直接输出的预测概率，不是从 a、b、θ 的显式公式计算。
+五个模型陆续加入后，ICL-Router 的 ID 平均准确率从 76.30% 升到 79.90%，OOD 从 66.47% 升到 69.90%；同一扩展过程中的 MODEL-SAT 分别从 71.71% 升到 74.81%、从 62.99% 升到 66.34%。这说明该方法能在不重训路由器的条件下利用扩大的候选池，也给出了最终路由准确率，而不只是能力预测误差。不过，新模型加入本身就可能提高模型池的性能上限；若要单独判断哪种新模型评估或档案构建方法更好，仍应保持候选池、评估题数与比较预算一致。[图 2、图 3 的数值对照](translations/05_ICL-Router_中文译文.md#table-fig-2-3)
 
-【定位·教学示例：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”。程序验证情境及0.78/0.42均非论文数据，也不证明概率已经校准。】
+<a name="experimental-evidence"></a>
 
-## ⑤ 成本：本文没有优化 API 费用，不能用“8 token”概括全部开销
+## 实验支持了哪些判断
 
-[原文，§3.4、附录 A.4] 论文的选模型公式是 `argmax P(Yes)`，**没有在路由打分里加入输入价、输出价或推理延迟**。作者讨论开销时称，8 个候选模型大约只需要输出 8 个分类 token，相比正式 LLM 回答往往输出数百/数千 token，开销可以接受。
+论文将 OlympiadBench、BBH、LogicBench、MMLUPro、MBPP 作为分布内（ID）任务，各自按 7:3 划分训练和测试；AIME、KORBench、MMLU-CF、AGIEval、HumanEval 则只用于分布外（OOD）测试。这些实验不应默认理解为使用了各基准的原始全量数据，具体抽样规模与 few-shot 设置见[附录数据表](translations/05_ICL-Router_中文译文.md#table-a-1)。
 
-【定位·原文事实＋作者开销主张：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.4 Cost Evaluation，第 1 段（本节唯一段；首句以“Although we use a 7B-scale model as the router”开头，含8 tokens），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“8 个词元”／原文“8 tokens”。A.4的acceptable range是作者定性说明，不是美元/延迟测量表。】
+对照方法包括随机路由、根据自然语言模型画像选模型的 LLM Router，以及 Max Expert、RouterDC、EmbedLLM、MODEL-SAT。Max Expert 是针对每个数据集固定选择该数据集上最好的单个模型，不是事先知道每一道题谁能答对的 Oracle。作者也调整了部分基线：RouterDC 和 EmbedLLM 换用了 Qwen3 嵌入模型，MODEL-SAT 由作者重新实现，因此不能把结果理解成直接照搬各方法原论文中的成绩。[基线定义](translations/05_ICL-Router_中文译文.md#s4-3) · [基线实现](translations/05_ICL-Router_中文译文.md#app-a-2)
 
-**重要区别 [推导]**：
+| 方法 | ID 平均准确率 | OOD 平均准确率 |
+| --- | ---: | ---: |
+| Random Router | 57.91% | 49.44% |
+| LLM Router | 62.36% | 52.95% |
+| Max Expert | 73.19% | 65.68% |
+| RouterDC | 72.32% | 63.13% |
+| EmbedLLM | 74.16% | 62.82% |
+| MODEL-SAT | 71.71% | 62.99% |
+| ICL-Router | **76.30%** | **66.47%** |
 
-- **生成 8 个 token**，说的是分类器最后写出的答案 token 数。
-- **计算 7B 模型对 8 个候选的条件概率**，还涉及 embedding、投影、每个候选 500 个示例向量的上下文处理和大量前向算力。
+ICL-Router 在这组实验中取得最高平均准确率。按表中数值计算，ID 相对 EmbedLLM 提高 2.14 个百分点，相对 Max Expert 提高 3.11 个百分点；OOD 相对 Max Expert 提高 0.79 个百分点。这里的提升幅度依比较对象而变，不宜用一个统一数字概括。论文正文关于 ID 超过 RouterDC 的“4.08 个百分点”与表值不一致，表中 76.30−72.32=3.98；全文译文保留原文表述，做比较时应明确采用表值。[完整 ID 表](translations/05_ICL-Router_中文译文.md#table-1) · [完整 OOD 表](translations/05_ICL-Router_中文译文.md#table-2)
 
-【定位·本文计算流程推导：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §4.2 Implementation Settings（QRT设置），[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“两层”／原文“two-layer”；另见：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.3 ICL Model Routing Training，Eq.(4–5)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“能力画像”／原文“capability profile”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.4 Cost Evaluation，第 1 段（本节唯一段；首句以“Although we use a 7B-scale model as the router”开头，含8 tokens），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“8 个词元”／原文“8 tokens”。每候选条件评估的表达不限定必须串行执行独立前向；缓存/批处理实现需另查。】
+QRT 消融回答了前面“为什么要先复述题目”的问题：去掉这一阶段后，ID 准确率从 76.30% 降为 74.01%，OOD 从 66.47% 降为 64.06%，分别下降 2.29 和 2.41 个百分点。这个结果支持查询重构对下游路由有帮助，但并不意味着仅靠维度匹配就能替代它。[表 4：QRT 消融](translations/05_ICL-Router_中文译文.md#table-4)
 
-输出 token 很少，**并不等于路由运行只消耗 8 token 对应的全部计算量**。论文没有提供足以直接量化这些 prefill 与 GPU 占用的完整延迟/美元成本表。因此不能把“成本低”当作严格实验结论，也不能凭此直接声称其开销必然高于某个其他算法，须同设备实测。[原文范围 + 推导]
+档案也不是越长越好。作者测试了四种示例数量：
 
-【定位·范围核验＋待实验：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.4 Cost Evaluation，第 1 段（本节唯一段；首句以“Although we use a 7B-scale model as the router”开头，含8 tokens），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“8 个词元”／原文“8 tokens”。检查本版§4 Tables 1–4、Figures 2–5及A.4：结果为准确率、结构和定性token说明，未给完整prefill/GPU/美元测量。不能推断实际高于特定算法。】
+| 每个档案的示例数 | ID 准确率 | OOD 准确率 |
+| --- | ---: | ---: |
+| 100 | 74.94% | 65.36% |
+| 300 | 75.87% | 65.75% |
+| 500 | **76.30%** | **66.47%** |
+| 1000 | 75.75% | 65.71% |
 
-## ⑥ 决策：只最大化“谁更可能答对”
+500 条在这四个设置中最好，增加到 1000 条反而下降。论文认为冗余或噪声可能是原因，但没有通过隔离实验确定机制；500 也不是理论最优题数或新模型接入必须遵守的常数。另一项消融中，从 mxbai-embed-large-v1（0.3B、1024 维）换到 Qwen3-8B-Embedding（8B、4096 维），ID/OOD 从 74.45%/64.55% 升到 76.30%/66.47%，说明输入表示的选择同样会影响路由效果。[示例数量实验](translations/05_ICL-Router_中文译文.md#table-fig-4-5) · [嵌入模型实验](translations/05_ICL-Router_中文译文.md#table-3)
 
-[原文，Eq.(6)]
+作者用 3 个随机种子重复训练，并对每个被选中的 LLM 以 temperature=0.3、top-p=1.0 采样 10 次，报告平均准确率。不过，主表没有逐方法列出完整标准差或置信区间，不能仅凭“用了 3 个种子”就认定所有差距都已得到统计显著性验证。[训练与解码设置](translations/05_ICL-Router_中文译文.md#s4-2-training-and-decoding)
 
-$$
-M^*(q)=\arg\max_{M\in\mathcal M}\widehat P(M,q).
-$$
+<a name="limits-and-next-questions"></a>
 
-【定位·原文公式改记号：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”。对应Eq.(6)。】
+## 阅读和复现时，应把准确率、接入成本与路由开销分开
 
-没有 α、β 的质量—成本权重，没有每题预算上限，没有延迟参数。因此**它与 RADAR、ZeroRouter、IRT-Router 不直接是同一个目标函数**。在比较“谁最好”时需要先把目标对齐：
+论文最终选择的是答对概率最高的候选，公式中没有 API 价格、延迟、每题预算上限，也没有质量与成本的权重。因此，它主要证明了这一模型表示方式在准确率导向路由中的价值。要与费用—质量联合优化的方法比较，需要先对齐数据、模型池和预算，不能直接把这里的准确率与另一篇论文的综合 reward 放在一起排名。[决策公式](translations/05_ICL-Router_中文译文.md#eq-6)
 
-【定位·原文目标＋本文比较原则：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”；另见：另文 `ZeroRouter_Chinese_Full_Translation.pdf`：[中译 PDF 第 7 页](pdfs/zh/ZeroRouter_Chinese.pdf#page=7)；原文 Multi-Objective Optimization，Eq.(17–18)；中译§3.3.1，[原文 PDF 第 4 页](https://arxiv.org/pdf/2601.06220v1#page=4)；Ctrl+F：中译“可选全局约束”／原文“optional global”。此处不把其他论文带成本的目标式当成ICL自身目标。】
+作者在成本讨论中指出，8 个候选只需生成约 8 个分类词元，而正式回答往往长达数百或数千词元。这个说法描述的是输出量；完整计算还包括查询嵌入、投影，以及 7B 路由器对能力档案和查询的上下文处理。附录没有给出足以量化这些环节的完整延迟、显存或美元成本表，因此“输出短”不能直接等同于“总路由成本很低”，也不能据此断言它一定比某个其他方法更贵。[附录 A.4：成本讨论](translations/05_ICL-Router_中文译文.md#app-a-4)
 
-- 如果只看准确率，ICL-Router 可以直接与其他准确率导向路由比较。
-- 如果研究成本—质量权衡，就必须补全候选的实际调用成本或额外成本预测器，并对比同预算下的质量，否则拿它的 76.3% 与 ZeroRouter 的 0.39 Reward 比较毫无意义。
+复现还要区分主方法与基线的硬件描述。8 张 A800 80GB 出现在 RouterDC 和 MODEL-SAT 的基线实现中，不能当作 ICL-Router 主方法明确报告的设备配置。主方法确实需要冻结的 8B embedding 模型、可训练的两层投影器和 7B 路由器；若只有单卡 8GB，可先用缓存表示与答题结果做轻量评估，但这不等于已经完成论文的联合训练复现。论文也承认，实验集中在小参数模型，所用基准并不专门评价聊天或指令遵循能力。[实现设置](translations/05_ICL-Router_中文译文.md#s4-2) · [基线硬件说明](translations/05_ICL-Router_中文译文.md#app-a-2) · [原文局限](translations/05_ICL-Router_中文译文.md#app-a-5)
 
-【定位·原文数值口径＋本文建议：[中译 PDF 第 6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6)；原文 Table 1（ID准确率与原始8模型），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“76.30”／原文“76.30”；另见：另文 `ZeroRouter_Chinese_Full_Translation.pdf`：[中译 PDF 第 12 页](pdfs/zh/ZeroRouter_Chinese.pdf#page=12)；原文 Table 2（新模型锚点采样消融），[原文 PDF 第 7 页](https://arxiv.org/pdf/2601.06220v1#page=7)；Ctrl+F：中译“D-最优性”／原文“D-optimality”；另见：另文 `ZeroRouter_Chinese_Full_Translation.pdf`：[中译 PDF 第 8–9 页](pdfs/zh/ZeroRouter_Chinese.pdf#page=8)；原文 Evaluation Metrics，Eq.(19)；中译§4.1，[原文 PDF 第 5 页](https://arxiv.org/pdf/2601.06220v1#page=5)；Ctrl+F：中译“总奖励”／原文“total reward”。76.30是准确率百分数；0.39是加权Reward。需先统一候选、预算、指标和评测协议。】
+如果沿着这篇工作继续做研究，现有结果最适合引出以下待验证的问题，而不是直接据此宣布发现了研究空白：
 
-添加一个线性成本惩罚虽容易，但它本身不是足够强的算法创新。真正的问题是：对成本差异很大的新模型，怎样以更少的测试题、可控的路由器开销得到稳定的最终效用收益。[推导]
+- **同样题数，怎样选题更有效？** 可以比较原来的 1–4 个模型答对规则、包含 5–7 个模型答对题目的分层规则、随机选择、D-optimal 或自适应选题；保持预算和上下文长度一致，再看最终路由表现。排除某类题是否损害强新模型的识别，目前只是一个假设。
+- **较短档案能否保住决策质量？** 可在 100、200、500 题等相同预算下比较档案构建方式，并检查减少预测误差是否真的改变最终选中的模型。200 题和这些替代选题法是拟议实验，不是论文已经报告的结果；决策导向的设计是否有新意，也还需要查相关工作。
+- **把完整开销算进去后，收益还剩多少？** 可以测量 8、13、20 个候选时的预处理、实际路由时间、显存或能耗，并在多价位 API 与开源模型混合池中比较同预算质量或决策损失。论文报告了初始 8 个及扩展到 13 个的准确率实验，20 个候选和成本异质池属于后续评测建议，不能写成已有结论。
 
-【定位·本文研究判断：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.4 Cost Evaluation，第 1 段（本节唯一段；首句以“Although we use a 7B-scale model as the router”开头，含8 tokens），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“8 个词元”／原文“8 tokens”。创新性不能由本篇单独证明；需要新近文献和实验，不是作者结论。】
-
-## ⑦ 新模型接入：固定成绩册，核心网络不重训
-
-[原文，§3.4、§4.5] 新模型来了，使用**原来同一套 500 道固定题**测试它，获得 500 个 Yes/No 标签，与对应题目向量组合成为新档案。之后将档案加入路由器的候选集合，投影器与 7B 路由器不用因这个新模型再做参数训练。
-
-【定位·原文事实：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”。固定题集与无需重训明确在§3.4；500为实验采用的K。】
-
-这里和另两篇一眼看出区别：
-
-| 方法 | 新模型需要回答几题？ | 是否根据新模型前面答案实时改选下一题？ | 核心路由器是否重训？ |
-|---|---:|---|---|
-| **ICL-Router** | **500** | **否**，提前定好 | 否  【定位·原文事实：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”。500为主设置。】 |
-| **ZeroRouter** | **200** | **否**，D-optimal 预选 | 否  【定位·另篇原文事实：另文 `ZeroRouter_Chinese_Full_Translation.pdf`：[中译 PDF 第 4 页](pdfs/zh/ZeroRouter_Chinese.pdf#page=4)；原文 Information-Theoretic Anchor Selection，Eq.(2–4)；中译§3.1.1，[原文 PDF 第 2–3 页](https://arxiv.org/pdf/2601.06220v1#page=2)；Ctrl+F：中译“贪心前向选择”／原文“greedy forward”；另见：另文 `ZeroRouter_Chinese_Full_Translation.pdf`：[中译 PDF 第 11 页](pdfs/zh/ZeroRouter_Chinese.pdf#page=11)；原文 Efficient Onboarding with Minimal Data；中译§4.4，[原文 PDF 第 6 页](https://arxiv.org/pdf/2601.06220v1#page=6)；Ctrl+F：中译“200 个查询”／原文“200”。200为其报告预算。】 |
-| **RADAR** | **5000/新配置（主设置）** | **是**，Fisher 更新 | 否  【定位·另篇原文事实＋算法口径：另文 `RADAR_中文译本_正文.pdf`：[中译 PDF 第 6–7 页](pdfs/zh/RADAR_Chinese_Body.pdf#page=6)；原文 RADAR §3.5，Eq.(7–9)，[原文 PDF 第 6–7 页](https://arxiv.org/pdf/2509.25426v3#page=6)；Ctrl+F：中译“当前能力估计”／原文“Fisher information”；另见：另文 `RADAR_中文译本_正文.pdf`：[中译 PDF 第 9 页](pdfs/zh/RADAR_Chinese_Body.pdf#page=9)；原文 RADAR §4.2 Model Scalability and Generalization Evaluation，[原文 PDF 第 9 页](https://arxiv.org/pdf/2509.25426v3#page=9)；Ctrl+F：中译“5,000”／原文“5k”。5,000见§4.2，单配置迭代见§3.5；不要误当全部8个新配置合计5,000次回答。】 |
-
-**新模型实验 [原文，图 2/3]**：逐步加入 5 个模型后，ID 平均准确率从 **76.3% → 79.9%**，OOD 平均从约 **66.4% → 69.9%**。这是接入后真实路由准确率的变化，比“只评价新模型 θ 或 P 的预测误差”多了一步部署验证。但是**候选池新增模型本来就可能提高 Oracle 的上界**，要证明 profiling 方法优秀，还需在相同池与同一预算下比较其他 onboarding 方法。
-
-【定位·原文数值＋本文对照建议：[中译 PDF 第 8–9 页](pdfs/zh/ICL-Router_Chinese.pdf#page=8)；原文 §4.5 Scalability to New Models，Figures 2–3，[原文 PDF 第 6 页](https://arxiv.org/pdf/2510.09719v3#page=6)；Ctrl+F：中译“Gemma3-12B”／原文“Gemma3-12B”。原文§4.5文字将起点写66.4%，Table 2与图3为66.47%；终点69.90%。Oracle上界与同预算对照属于本文解释。】
-
-## ⑧ 评测：结果亮眼，也有真实局限
-
-[原文，§4、表 1–4]
-
-**ID 的 5 个数据集**：OlympiadBench、BBH、LogicBench、MMLU-Pro、MBPP，分别按 7:3 训练测试；**OOD 的 5 个数据集**：AIME、KORBench、MMLU-CF、AGIEval、HumanEval，完全作为未见任务测试。实验样本数及 few-shot 细节见附录 A.1，不应默认使用各 benchmark 的全量原始数据。
-
-【定位·原文事实：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §4.1 Datasets，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“7:3”／原文“7:3”；另见：[中译 PDF 第 14–15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=14)；原文附录 A.1 Datasets 的数据表（英文附录 Table 1；中文汇编第14页表A.1）与对应数据集条目段（中文汇编第14–15页），[原文 PDF 第 10 页](https://arxiv.org/pdf/2510.09719v3#page=10)；Ctrl+F：中译“1,080”／原文“1,080”。英文附录表1与正文表1重号；此处数据规模请查物理第10页的附录表。】
-
-**对照算法**：Random Router、让 Qwen2.5-7B 通过文字档案选模型的 `LLM Router`、Max Expert、RouterDC、EmbedLLM、MODEL-SAT。注意 **Max Expert 选择的是“每个数据集最好的固定单模型”**，并不是“每道题事先知道答案的 Oracle”。作者为了比较公平对一些 baseline 调整了编码器；对 MODEL-SAT 进行了重新实现，不能简单理解为所有基线毫无改动地复用了原作者成绩。
-
-【定位·原文事实＋定义澄清：[中译 PDF 第 7 页](pdfs/zh/ICL-Router_Chinese.pdf#page=7)；原文 §4.3 Baselines，[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“每个数据集”／原文“each dataset”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.2 Baselines，第 2–4 段（分别以 RouterDC、EmbedLLM、MODEL-SAT 开头；八张GPU在第2、4段），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“八张”／原文“eight NVIDIA”。Max Expert是per-dataset最佳；A.2明确替换编码器与重实现MODEL-SAT。】
-
-**原文主要结果**：
-
-| 指标 | ICL-Router | 强参照 | 结论 |
-|---|---:|---:|---|
-| ID 平均准确率 | **76.30%** | EmbedLLM **74.16%**；Max Expert **73.19%** | 本设置下路由有收益  【定位·原文数值：[中译 PDF 第 6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6)；原文 Table 1（ID准确率与原始8模型），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“76.30”／原文“76.30”】 |
-| OOD 平均准确率 | **66.47%** | Max Expert **65.68%**；EmbedLLM **62.82%** | 分布外也改善，但提升幅度依对照而异  【定位·原文数值：[中译 PDF 第 7 页](pdfs/zh/ICL-Router_Chinese.pdf#page=7)；原文 Table 2（OOD准确率），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“66.47”／原文“66.47”】 |
-| 去掉查询复述预训练，ID | **74.01%** | 完整方法 **76.30%** | QRT 在实验里有作用  【定位·原文数值：[中译 PDF 第 11 页](pdfs/zh/ICL-Router_Chinese.pdf#page=11)；原文 §4.6 Effects of Query Reconstruction Training，Table 4，[原文 PDF 第 7 页](https://arxiv.org/pdf/2510.09719v3#page=7)；Ctrl+F：中译“74.01”／原文“74.01”】 |
-| 去掉查询复述预训练，OOD | **64.06%** | 完整方法 **66.47%** | OOD 下降更明显  【定位·原文数值：[中译 PDF 第 11 页](pdfs/zh/ICL-Router_Chinese.pdf#page=11)；原文 §4.6 Effects of Query Reconstruction Training，Table 4，[原文 PDF 第 7 页](https://arxiv.org/pdf/2510.09719v3#page=7)；Ctrl+F：中译“74.01”／原文“74.01”】 |
-
-**档案题数消融**：[原文，图 4/5] ID 100 条 **74.94%**、500 条 **76.30%**、1000 条反而 **75.75%**；OOD 100 条 **65.36%**、500 条 **66.47%**、1000 条 **65.71%**。所以“越多题越好”并不成立。500 是论文试过的一个较好配置，**不是理论上永远最优或所有新模型都必须测试的硬性常数**。
-
-【定位·原文数字＋范围澄清：[中译 PDF 第 10 页](pdfs/zh/ICL-Router_Chinese.pdf#page=10)；原文 §4.6 Effects of In-Context Exemplar Quantity，Figures 4–5，[原文 PDF 第 7 页](https://arxiv.org/pdf/2510.09719v3#page=7)；Ctrl+F：中译“74.94”／原文“74.94”。作者还测试300条；500最优仅针对图4–5列出的设置，不是理论最优。】
-
-**稳定性细节**：[原文，§4.2] 使用 3 个随机训练种子；为了平均被选择模型回答的随机性，测试时每个被选 LLM 以 temperature=0.3、top-p=1.0 生成 10 次并取平均。但主表没有给出每个方法完整的标准差/置信区间，所以不能用 3 个种子这个事实替代显著性证明。
-
-【定位·原文事实＋范围核验：[中译 PDF 第 6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6)；原文 §4.2 Implementation Settings（续页），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“五个epoch”／原文“five epochs”；另见：[中译 PDF 第 6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6)；原文 Table 1（ID准确率与原始8模型），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“76.30”／原文“76.30”；另见：[中译 PDF 第 7 页](pdfs/zh/ICL-Router_Chinese.pdf#page=7)；原文 Table 2（OOD准确率），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“66.47”／原文“66.47”。三种子和每次10采样来自§4.2；Table 1–2未列逐方法方差/置信区间。显著性保留判断为本文解释。】
-
-**硬件现实**：正文训练 7B 路由器和投影器，使用冻结的 8B embedding 模型生成表示；附录对某些增强基线还使用 **8 张 A800 80GB**。在单卡 8GB 环境，先做缓存驱动的轻量 profiling/评测通常更可控；复现实验要区分“能读现成数据预测”与“能完整联合微调大模型”。
-
-【定位·原文硬件事实＋本文建议：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §4.2 Implementation Settings（QRT设置），[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“两层”／原文“two-layer”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.2 Baselines，第 2–4 段（分别以 RouterDC、EmbedLLM、MODEL-SAT 开头；八张GPU在第2、4段），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“八张”／原文“eight NVIDIA”。八张A800指A.2的RouterDC及MODEL-SAT基线，不能当作ICL主方法的明确设备报告；8B embedding本身不训练。】
-
-## 对原笔记的核对与纠错
-
-| 旧笔记说法 | 结论 |
-|---|---|
-| 8 个原始 7–9B 模型，后加 5 个 | **正确，新增列表含 12B**  【定位·原文事实：[中译 PDF 第 6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6)；原文 Table 1（ID准确率与原始8模型），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“76.30”／原文“76.30”；另见：[中译 PDF 第 8–9 页](pdfs/zh/ICL-Router_Chinese.pdf#page=8)；原文 §4.5 Scalability to New Models，Figures 2–3，[原文 PDF 第 6 页](https://arxiv.org/pdf/2510.09719v3#page=6)；Ctrl+F：中译“Gemma3-12B”／原文“Gemma3-12B”】 |
-| embedding 用冻结的 Qwen3-Embedding-8B | **正确**  【定位·原文事实：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §4.2 Implementation Settings（QRT设置），[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“两层”／原文“two-layer”】 |
-| 第一阶段先复述题目再学分类 | **正确，QRT 不是最终路由损失**  【定位·原文事实：[中译 PDF 第 4 页](pdfs/zh/ICL-Router_Chinese.pdf#page=4)；原文 §3.2 Query Reconstruction Training，Eq.(1–3)，[原文 PDF 第 3–4 页](https://arxiv.org/pdf/2510.09719v3#page=3)；Ctrl+F：中译“重构损失”／原文“reconstruction loss”】 |
-| 第二阶段同时训练投影器和 7B 路由器 | **正确**  【定位·原文事实：[中译 PDF 第 6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6)；原文 §4.2 Implementation Settings（续页），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“五个epoch”／原文“five epochs”】 |
-| 500 题分成 1/2/3/4 人答对、各 125 | **正确，别漏掉排除了 5–7 人答对**  【定位·原文规则＋推论：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”】 |
-| 只看准确率，不在打分中考虑美元成本 | **正确**  【定位·原文公式：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”】 |
-| 每候选一个 7B 前向，路由总开销等于输出 token 数 | **后半句错误；prefill 等仍有计算**  【定位·本文开销解释：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.3 ICL Model Routing Training，Eq.(4–5)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“能力画像”／原文“capability profile”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.4 Cost Evaluation，第 1 段（本节唯一段；首句以“Although we use a 7B-scale model as the router”开头，含8 tokens），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“8 个词元”／原文“8 tokens”】 |
-| 3 随机种子意味着论文给出可靠方差区间 | **没有对应完整区间**  【定位·范围核验：[中译 PDF 第 6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6)；原文 §4.2 Implementation Settings（续页），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“五个epoch”／原文“five epochs”；另见：[中译 PDF 第 6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6)；原文 Table 1（ID准确率与原始8模型），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“76.30”／原文“76.30”；另见：[中译 PDF 第 7 页](pdfs/zh/ICL-Router_Chinese.pdf#page=7)；原文 Table 2（OOD准确率），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“66.47”／原文“66.47”】 |
-
-## 候选破题点
-
-**ICL-1 [原文→待实验]：固定选 1–4 人答对的题，漏掉 5–7 人答对的题，是否丢失对强新模型最有价值的信号？** 对能力明显高于旧池的新模型，旧模型大多答对的题也可能产生有用差异；要通过相同题数、同分布预算下的分层选题消融验证，不能预设会提高。
-
-【定位·原文选题规则→待实验：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”。5–7人组被排除可推出；对强新模型更有价值是未验证假说。】
-
-**ICL-2 [原文→待实验]：500 条不是越多越好，那究竟如何选择更好的少量档案？** 相同 100/200/500 预算，比较随机、作者规则、D-optimal、基于模型回答反馈的自适应规则，同时控制路由器上下文长度与训练是否公平。
-
-【定位·原文消融→本文拟议实验：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”；另见：[中译 PDF 第 10 页](pdfs/zh/ICL-Router_Chinese.pdf#page=10)；原文 §4.6 Effects of In-Context Exemplar Quantity，Figures 4–5，[原文 PDF 第 7 页](https://arxiv.org/pdf/2510.09719v3#page=7)；Ctrl+F：中译“74.94”／原文“74.94”。100/300/500/1000为作者消融；加入200或其他选题法属本文建议，不在原文结果中。】
-
-**ICL-3 [原文范围→待实验]：只报告准确率，路由器本身的 7B 计算成本没有系统量化。** 使用真实 wall-clock/显存/能耗或 API 等效价，衡量 8/13/20 候选时预处理和推理开销，寻找是否存在更轻量的压缩档案替代方案。
-
-【定位·本版报告范围→待实验：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.4 Cost Evaluation，第 1 段（本节唯一段；首句以“Although we use a 7B-scale model as the router”开头，含8 tokens），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“8 个词元”／原文“8 tokens”；另见：[中译 PDF 第 6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6)；原文 Table 1（ID准确率与原始8模型），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“76.30”／原文“76.30”；另见：[中译 PDF 第 7 页](pdfs/zh/ICL-Router_Chinese.pdf#page=7)；原文 Table 2（OOD准确率），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“66.47”／原文“66.47”。8/13来自原始池及新增5模型；20候选、能耗和压缩档案方案为拟议评测，非原文数据。】
-
-**ICL-4 [推导→待文献/实验]：目标是预测每个模型答对概率，而部署可能只关心“新模型是否改变最终最佳决策”。** 可将固定能力档案或动态选题与路由效用联系起来，但需对照近期决策导向实验设计方法，不能只在 profiling 上换个选题算法就直接声称创新。
-
-【定位·本文研究假说／待文献：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.3 ICL Model Routing Training，Eq.(4–5)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“能力画像”／原文“capability profile”；另见：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”。Eq.(5–6)是推导起点；论文没有证明所提决策导向设计更新颖或更优。】
-
-**ICL-5 [原文→待实验]：模型尺寸较集中，价位差异未系统报告，成本异质池泛化还没证明。** 在多价位 API 模型加开源模型的混合池中，比较完整预测与成本权衡及实际 regret；与 IRT/RADAR 设定对齐后再说优势。
-
-【定位·原文范围→待实验：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.5 Limitations，第 1 段（本节唯一段；首句以“Due to limitations in computational resources”开头，原文从左栏底部续至右栏顶部），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“小参数规模”／原文“small-parameter”；另见：[中译 PDF 第 6 页](pdfs/zh/ICL-Router_Chinese.pdf#page=6)；原文 Table 1（ID准确率与原始8模型），[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“76.30”／原文“76.30”；另见：[中译 PDF 第 8–9 页](pdfs/zh/ICL-Router_Chinese.pdf#page=8)；原文 §4.5 Scalability to New Models，Figures 2–3，[原文 PDF 第 6 页](https://arxiv.org/pdf/2510.09719v3#page=6)；Ctrl+F：中译“Gemma3-12B”／原文“Gemma3-12B”。校订：论文支持“模型尺寸较集中”，没有报告价格表来证明“价位集中”；异质成本池结果仍待验证。】
-
-## 老师可能问
-
-1. 为什么要先训练“复述题目”？因为投影向量与 7B 路由器的内部表示有分布鸿沟，QRT 帮助学会解读向量，而不仅是尺寸匹配。 【定位·原文动机＋讲解：[中译 PDF 第 4 页](pdfs/zh/ICL-Router_Chinese.pdf#page=4)；原文 §3.2 Query Reconstruction Training，Eq.(1–3)，[原文 PDF 第 3–4 页](https://arxiv.org/pdf/2510.09719v3#page=3)；Ctrl+F：中译“重构损失”／原文“reconstruction loss”】
-2. 500 道是新模型的新训练集吗？不是；是供新模型测评的固定代表性题单，拿到结果后建立它的上下文档案，**不重新训练主路由器**。 【定位·原文事实：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.4 Inference and Scalable Model Incorporation，Eq.(6)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“同一个查询集合”／原文“same query set”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.3 Challenging Query Set Construction，第 1 段（本节唯一段；首句以“To construct the set of 500 challenging queries”开头，含每组125题），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“125”／原文“125”】
-3. 为什么 Max Expert 不是 Oracle？前者每个数据集固定选一个最好模型；后者每道题都事先知道所有模型答得怎样。 【定位·原文定义＋本文对照：[中译 PDF 第 7 页](pdfs/zh/ICL-Router_Chinese.pdf#page=7)；原文 §4.3 Baselines，[原文 PDF 第 5 页](https://arxiv.org/pdf/2510.09719v3#page=5)；Ctrl+F：中译“每个数据集”／原文“each dataset”】
-4. 既然输出 8 token，为什么仍可能有不小开销？因为 7B 计算预填充档案与输入的前向时间并没有被输出 token 数描述。 【定位·本文计算流程解释：[中译 PDF 第 5 页](pdfs/zh/ICL-Router_Chinese.pdf#page=5)；原文 §3.3 ICL Model Routing Training，Eq.(4–5)，[原文 PDF 第 4 页](https://arxiv.org/pdf/2510.09719v3#page=4)；Ctrl+F：中译“能力画像”／原文“capability profile”；另见：[中译 PDF 第 15 页](pdfs/zh/ICL-Router_Chinese.pdf#page=15)；原文附录 A.4 Cost Evaluation，第 1 段（本节唯一段；首句以“Although we use a 7B-scale model as the router”开头，含8 tokens），[原文 PDF 第 11 页](https://arxiv.org/pdf/2510.09719v3#page=11)；Ctrl+F：中译“8 个词元”／原文“8 tokens”】
-5. 为什么 1000 条不如 500？论文给出下降现象，但“冗余/噪声/上下文负担”都只是待进一步验证的解释，不能据此推断单一原因。 【定位·原文现象＋解释边界：[中译 PDF 第 10 页](pdfs/zh/ICL-Router_Chinese.pdf#page=10)；原文 §4.6 Effects of In-Context Exemplar Quantity，Figures 4–5，[原文 PDF 第 7 页](https://arxiv.org/pdf/2510.09719v3#page=7)；Ctrl+F：中译“74.94”／原文“74.94”。原文也用likely提出冗余/噪声解释；没有隔离机制实验，因此不能作为已证实原因。】
-
-**原文定位**：§3.2 重建 Eq.(1–3)；§3.3 档案 Eq.(4) 与分类损失 Eq.(5)；§3.4 推理 Eq.(6)；§4.2 训练细节；§4.4 表 1/2；§4.5 图 2/3；§4.6 图 4/5、表 3/4；附录 A.2 baseline 修改，A.3 500 题规则，A.4 成本，A.5 局限。
-
-【定位·导航补充：[中译 PDF 第 4 页](pdfs/zh/ICL-Router_Chinese.pdf#page=4)；原文 §3.2 Query Reconstruction Training，Eq.(1–3)，[原文 PDF 第 3–4 页](https://arxiv.org/pdf/2510.09719v3#page=3)；Ctrl+F：中译“重构损失”／原文“reconstruction loss”。各式/表的精确物理页见篇首导航与上文邻接定位；不要将附录Table 1和正文Table 1混同。】
+向老师讲这篇论文时，最值得抓住的关系是：先训练路由器理解紧凑题目表示，再让它从候选模型的答题记录中预测能力。接入新模型时更新的是记录，所以可以不重训路由器；这一便利是否值得其模型规模与上下文计算开销，则需要准确率之外的部署测量来回答。
