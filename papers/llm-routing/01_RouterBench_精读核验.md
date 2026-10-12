@@ -1,8 +1,9 @@
 # 01 RouterBench：先定好尺子，再谈路由好不好
 
-> **在主线上的位置：第 0 站（尺子）。**
-> 主线问题是“新模型要测多少题、测哪些题，才能接进路由池”。在回答它之前，先得有一把公平的尺子：路由器到底比什么强才算有用？RouterBench 给出了这把尺子，后面五篇都在它定下的数据、基线和指标上比较自己。
-> 它留给下一站的问题：它的预测方法靠“每个模型在历史题上的成绩”，**新模型没有历史成绩时怎么办？**
+> **在两条主线上的位置**（两条主线见 [README](README.md#两条主线)）
+>
+> - **主线 A（来一个 query，怎样选模型）· 第 1 篇：定好尺子。** 路由器到底比什么强才算有用？RouterBench 给出逐题缓存、Zero 基线、Oracle 和 AIQ，后面五篇都在这把尺子上比较自己。它也给出最朴素的预测式路由（kNN、MLP），核心发现是：这类方法没有稳定赢过不看题目的 Zero 基线。
+> - **主线 B（新模型怎样接入）· 起点。** RouterBench 不处理接入。它的预测靠每个模型在历史题上的成绩，**新模型没有历史成绩时怎么办？** 这就是主线 B 的出发点。它的缓存和指标则是做接入实验的评测框架。
 >
 > 原论文：Hu 等，*RouterBench: A Benchmark for Multi-LLM Routing System*，[arXiv:2403.12031v2](https://arxiv.org/abs/2403.12031v2)（2024.03）· [中文精读材料](translations/01_RouterBench_中文精读材料.md#rb-title)（不是全文译本）
 > 全仓库统一记号见 [README](README.md#统一记号)。
@@ -53,7 +54,7 @@ $\lambda$ 是愿付价（willingness to pay）。例：A 预测 0.8、成本 0.0
 
 **一个口径差别。** 选模型时 $\widehat c_m$ 用每 token 定价近似；评测时记的是按实际输入、输出 token 算出的逐题费用（开放权重模型参考 Together AI 价格）。复现时两者要分开写清。[费用口径](translations/01_RouterBench_中文精读材料.md#rb-appendix-cost)
 
-**另一条路：级联。** 先调用便宜模型，回答不合格再升级。一题可能调用多次，费用累加。论文用已知质量构造理想 Judge，再以概率 $\varepsilon$ 翻转判断来模拟误判。级联要先生成再判断，与主线关心的“生成前选模型”是两种设定。[级联流程](translations/01_RouterBench_中文精读材料.md#rb-sec-5-4)
+**另一条路：级联。** 先调用便宜模型，回答不合格再升级。一题可能调用多次，费用累加。论文用已知质量构造理想 Judge，再以概率 $\varepsilon$ 翻转判断来模拟误判。级联要先生成再判断，与两条主线关心的“生成前选模型”是两种设定。[级联流程](translations/01_RouterBench_中文精读材料.md#rb-sec-5-4)
 
 ## 3. 尺子本身：Zero 基线、Oracle 与 AIQ
 
@@ -103,9 +104,11 @@ MMLU 上两种方法都高于 Zero；ARC-Challenge 和 MBPP 上都低于 Zero；
 - RouterBench（2024）与 LLMRouterBench（2026）是两篇不同的论文。
 - 前面已有 FrugalGPT 等路由研究，RouterBench 的贡献是统一比较规则，而不是首次证明路由有价值。[与前序工作的关系](translations/01_RouterBench_中文精读材料.md#rb-supplement-position)
 
-## 6. 对主线研究的用处
+## 6. 对研究的用处
 
-RouterBench 本身不处理新模型接入：kNN 需要新模型在历史题上的成绩，MLP 也需要相应训练数据。它在主线上的用处是三样东西：[研究设定的区别](translations/01_RouterBench_中文精读材料.md#rb-sec-7-1)
+**对主线 A：** 值得先跑的三个检查见本节最后一段，它们对应 README “主线 A 留下的问题”中的成本口径和预算类型两项。
+
+**对主线 B：** RouterBench 本身不处理新模型接入：kNN 需要新模型在历史题上的成绩，MLP 也需要相应训练数据。它对接入研究的用处是三样东西：[研究设定的区别](translations/01_RouterBench_中文精读材料.md#rb-sec-7-1)
 
 1. **逐题缓存**，让选题实验可以离线做；
 2. **Zero 基线**，判断一个接入方法是否真有逐题收益；
@@ -115,4 +118,7 @@ RouterBench 本身不处理新模型接入：kNN 需要新模型在历史题上�
 
 值得先跑的三个检查（研究建议，非论文结论）：同一数据下把单模型、Zero、kNN/MLP、Oracle 放在一起，看逐题互补性能否从输入学出；把固定单价换成逐题成本，看选择翻转比例；明确业务约束是批量平均预算还是每条硬预算。[成本依据](translations/01_RouterBench_中文精读材料.md#rb-appendix-cost) · [随机混合的适用含义](translations/01_RouterBench_中文精读材料.md#rb-sec-3-2)
 
-**下一站：** [02 RouteLLM](02_RouteLLM_精读核验.md) 换了一个思路——不去认识具体模型，只判断“这题要不要强模型”，于是换一对新模型也能直接用。
+**接着读：** [02 RouteLLM](02_RouteLLM_精读核验.md)。
+
+- 主线 A：它把多选一缩成强弱二选一，用偏好数据和阈值做决策，并显示训练数据覆盖对效果影响很大。
+- 主线 B：它不去认识具体模型，只判断“这题要不要强模型”，所以换一对新模型也能直接用，一道题都不测。
