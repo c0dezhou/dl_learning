@@ -4,25 +4,27 @@
 > 核验范围：库里的四篇英文 PDF（IRT-Router、RADAR、ZeroRouter、ICL-Router）+ 公开的 RouterBench 和 RouteLLM 原论文。  
 > 更新日：2026-10-12。明确区分论文事实、公式推导与待验证想法；**尚未完成逐仓库源代码核验或独立训练复现**。
 
-## 本次新增：逐项原文定位怎么用
+## 中文 PDF 与逐项定位怎么用
 
-每篇笔记在对应论述旁补充来源定位，并在篇首提供重点导航。给老师讲某个结论时，先看该段旁的章节、式号、图表号，再按中文 PDF 页码翻页；需要核对作者原话或中文未收录的内容时，打开英文原文。
+已有中文原文译本的四篇笔记，正文定位优先链接到本仓库的中文 PDF，并在篇首提供重点导航。给老师讲某个结论时，先看该段旁的章节、式号、图表号，再按中文 PDF 页码翻页。附录不新增翻译，单独标出原附录的小节、段落关键词、图表号与物理页。
 
 - **页码口径**：“中译 PDF 第 N 页”“英文 PDF 第 N 页”均为阅读器从 1 开始计数的物理页，包含封面；不默认等于页脚印刷页码。各篇按实际文件说明区别。
 - **来源优先级**：英文原论文是事实依据；中文译本是方便查阅的对应入口；中文精读笔记属于二次整理，不能替代作者原文。
 - **推导与想法**：“推导”定位到所用公式、数据或前提；“待实验／待文献”是笔记中的候选问题，不代表作者已经证实，也不代表原文有一句同样的话。
-- **版本**：使用各篇篇首标明的版本，避免 arXiv 更新后页码移动。英文 PDF 的 `#page=N` 链接由支持该参数的阅读器定位；如果未自动跳页，请输入所标页码。
+- **版本**：使用各篇篇首标明的版本，避免 arXiv 更新后页码移动。PDF 链接的 `#page=N` 表示目标物理页。GitHub 内置预览可能不执行该参数；若未自动跳页，请下载 PDF 后在阅读器输入标明的页码。不能把 GitHub 预览是否跳页等同于定位是否正确。
 
 | 笔记 | 本次可用的中文资料 | 阅读器页数 | 中文查阅边界 |
 |---|---|---:|---|
-| [RouterBench](01_RouterBench_精读核验.md) | `RouterBench_Research_Reading_Notes.pdf` | 12 | 中文阅读笔记，**不是原文译本**；原文定位以英文 PDF 为准 |
-| [RouteLLM](06_RouteLLM_精读核验.md) | 本次未定位到中文版 PDF | — | 已按英文原文定位，不猜测中文页码 |
-| [IRT-Router](02_IRT-Router_精读核验.md) | `IRT-Router_中文译文_含图表与公式.pdf` | 22 | 正文第 1–7 节为中文；参考文献、附录保留英文 |
-| [RADAR](03_RADAR_精读核验.md) | `RADAR_中文译本_正文.pdf` | 15 | 只收录正文；附录 A–E 须查英文原文 |
-| [ZeroRouter](04_ZeroRouter_精读核验.md) | `ZeroRouter_Chinese_Full_Translation.pdf` | 14 | 对应 arXiv:2601.06220v1 |
-| [ICL-Router](05_ICL-Router_精读核验.md) | `ICL-Router_中文译本_含完整图表公式.pdf` | 15 | 按该译本的物理页定位；原文章节编号并列保留 |
+| [RouterBench](01_RouterBench_精读核验.md) | 正文中文译本待补 | — | 现有中文阅读笔记不是译本；等待原文 PDF 后补译，目前保留精确英文定位 |
+| [RouteLLM](06_RouteLLM_精读核验.md) | 正文中文译本待补 | — | 等待原文 PDF 后补译，目前保留精确英文定位 |
+| [IRT-Router](02_IRT-Router_精读核验.md) | [IRT-Router 中文 PDF](pdfs/zh/IRT-Router_Chinese.pdf) | 22 | 正文第 1–7 节为中文；参考文献、附录保留英文 |
+| [RADAR](03_RADAR_精读核验.md) | [RADAR 中文正文 PDF](pdfs/zh/RADAR_Chinese_Body.pdf) | 15 | 只收录正文；附录 A–E 须查英文原文 |
+| [ZeroRouter](04_ZeroRouter_精读核验.md) | [ZeroRouter 中文 PDF](pdfs/zh/ZeroRouter_Chinese.pdf) | 14 | 对应 arXiv:2601.06220v1 |
+| [ICL-Router](05_ICL-Router_精读核验.md) | [ICL-Router 中文 PDF](pdfs/zh/ICL-Router_Chinese.pdf) | 15 | 按该译本的物理页定位；原文章节编号并列保留 |
 
-中文文件均使用你已有的 llmrouter 资料，本次未把 PDF 另行上传到仓库。原文定位补全范围为下面六篇独立笔记；本总索引的跨论文归纳仍需结合各篇旁注阅读。
+四份 PDF 直接来自已有的 llmrouter 资料，按原字节保存到 `pdfs/zh/`，仅简化文件名，没有重排页码。IRT 的附录保留英文；RADAR 的正文译本不含附录，相关条目跳转固定版本英文附录；ICL 现有译本已经包含附录，本次不重译；ZeroRouter v1 文件并未实际附上正文所提的附录，不补造段落或页码。
+
+RouterBench 与 RouteLLM 的全文中文版尚未完成：本次未找到用户提供的原文 PDF 或可核实的全文翻译许可。收到原文 PDF 后只补译正文，附录继续按原文定位。这里不把阅读笔记冒充译本。
 
 ## 第一部分：打开对应笔记（六篇，RouteLLM 放在 RouterBench 后阅读）
 
